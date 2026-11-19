@@ -1,0 +1,340 @@
+'use strict';
+/* StockMate front end: shared helpers, generic list / detail / form screens and the router. */
+
+// ------------------------------------------------------------------ tiny DOM helper
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'checked') el.checked = !!v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid == null || kid === false) continue;
+    el.append(kid.nodeType ? kid : document.createTextNode(kid));
+  }
+  return el;
+}
+const $ = (sel, el = document) => el.querySelector(sel);
+
+// ------------------------------------------------------------------ formatting
+const nf = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 3 });
+const mf = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' });
+function fmtNum(v) { return v == null || v === '' ? '' : nf.format(Number(v)); }
+function fmtMoney(v) { return v == null || v === '' ? '' : mf.format(Number(v)); }
+function fmtDate(v) {
+  if (!v) return '';
+  return new Date(v + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+function fmtDateTime(v) {
+  if (!v) return '';
+  return new Date(v).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function monthStartISO() { return todayISO().slice(0, 8) + '01'; }
+const pretty = s => String(s).replace(/_/g, ' ');
+
+// ------------------------------------------------------------------ server calls
+async function api(method, path, body) {
+  const res = await fetch('/api' + path, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) { /* not JSON */ }
+  if (!res.ok) throw new Error((data && data.error) || res.statusText || 'Request failed');
+  return data;
+}
+
+function toast(msg, kind = 'ok') {
+  const t = h('div', { class: 'toast ' + kind, role: 'status' }, msg);
+  const box = $('#toasts');
+  box.append(t);
+  while (box.children.length > 3) box.firstChild.remove();
+  setTimeout(() => t.remove(), kind === 'err' ? 6000 : 3000);
+}
+
+// ------------------------------------------------------------------ lookup data for dropdowns & labels
+let refData = {}; // entity name -> Map(id -> row)
+
+async function ensureRefs(names) {
+  await Promise.all([...new Set(names)].filter(n => !refData[n]).map(async n => {
+    const rows = await api('GET', '/' + n);
+    refData[n] = new Map(rows.map(r => [r.id, r]));
+  }));
+}
+function refsFor(...entities) {
+  const out = [];
+  for (const E of entities) if (E) for (const f of E.fields) if (f.t === 'ref') out.push(f.ref);
+  return out;
+}
+function refText(name, id) {
+  const row = refData[name] && refData[name].get(Number(id));
+  return row ? LABEL[name](row) : '#' + id;
+}
+const invalidateRefs = () => { refData = {}; };
+
+// ------------------------------------------------------------------ cells
+function cell(f, row) {
+  if (f.fmt) {
+    const o = f.fmt(row);
+    return o.cls ? h('span', { class: o.cls }, o.text) : o.text;
+  }
+  const v = row[f.k];
+  if (v == null || v === '') return '';
+  if (f.t === 'ref') return refText(f.ref, v);
+  if (f.t === 'bool') return v ? 'Yes' : 'No';
+  if (f.badge) return h('span', { class: 'badge b-' + String(v).replace(/\W/g, '_') }, pretty(v));
+  if (f.t === 'date') return fmtDate(v);
+  if (f.t === 'datetime') return fmtDateTime(v);
+  if (f.m) return fmtMoney(v);
+  if (f.t === 'number') return fmtNum(v);
+  return String(v);
+}
+const fieldOf = (E, k) => E.fields.find(f => f.k === k);
+const isNumeric = f => f.t === 'number';
+
+function table(E, rows, { onRow, rowButtons } = {}) {
+  const cols = E.cols.map(k => fieldOf(E, k));
+  const thead = h('thead', {}, h('tr', {}, cols.map(f => h('th', { class: isNumeric(f) ? 'num' : '' }, f.l)), rowButtons ? h('th', { class: 'act-col' }) : null));
+  const tbody = h('tbody');
+  for (const r of rows) {
+    const tr = h('tr', { class: [onRow ? 'click' : '', E.rowClass ? E.rowClass(r) : ''].join(' ').trim() },
+      cols.map((f, i) => h('td', { class: isNumeric(f) ? 'num' : '' }, i === 0 && onRow ? h('a', { href: '#', onclick: e => { e.preventDefault(); onRow(r); } }, cell(f, r)) : cell(f, r))),
+      rowButtons ? h('td', { class: 'act-col' }, rowButtons(r)) : null);
+    if (onRow) tr.addEventListener('click', e => { if (!e.target.closest('button, a')) onRow(r); });
+    tbody.append(tr);
+  }
+  if (!rows.length) tbody.append(h('tr', {}, h('td', { colspan: cols.length + (rowButtons ? 1 : 0), class: 'empty' }, 'Nothing here yet.')));
+  return h('div', { class: 'table-wrap' }, h('table', {}, thead, tbody));
+}
+
+// ------------------------------------------------------------------ forms (native <dialog>)
+function openForm({ title, fields, values = {}, submitLabel = 'Save', onSubmit }) {
+  const dlg = h('dialog', { class: 'modal' });
+  const err = h('p', { class: 'form-err', role: 'alert' });
+  const inputs = {};
+
+  const rowsEl = fields.filter(f => !f.ro).map(f => {
+    let input;
+    const id = 'f_' + f.k;
+    let v = values[f.k];
+    if (v === undefined) v = typeof f.def === 'function' ? f.def() : f.def;
+    if (v === undefined && f.t === 'date' && !f.nodef) v = todayISO();
+
+    if (f.t === 'textarea') input = h('textarea', { id, rows: 3 });
+    else if (f.t === 'select' || f.t === 'ref') {
+      input = h('select', { id });
+      if (f.t === 'ref' || !f.req) input.append(h('option', { value: '' }, f.t === 'ref' ? '— choose —' : ''));
+      const opts = f.t === 'select' ? f.opts.map(o => [o, pretty(o)])
+        : [...refData[f.ref].values()].map(r => [r.id, LABEL[f.ref](r)]);
+      for (const [val, text] of opts) input.append(h('option', { value: val }, text));
+    } else if (f.t === 'bool') input = h('input', { id, type: 'checkbox' });
+    else input = h('input', { id, type: f.t === 'number' ? 'number' : f.t === 'date' ? 'date' : 'text', step: f.t === 'number' ? (f.step || 'any') : null });
+
+    if (f.req) input.required = true;
+    if (f.t === 'bool') input.checked = v === undefined ? true : !!v;
+    else if (v != null) input.value = v;
+    else if (f.t === 'select' && f.req) input.value = f.opts[0];
+    inputs[f.k] = input;
+
+    return f.t === 'bool'
+      ? h('label', { class: 'check', for: id }, input, f.l)
+      : h('div', { class: 'field' }, h('label', { for: id }, f.l, f.req ? h('span', { class: 'req', 'aria-hidden': 'true' }, ' *') : null), input);
+  });
+
+  // e.g. choosing a product fills in its price
+  for (const f of fields) {
+    if (!f.fillFrom) continue;
+    const src = inputs[f.fillFrom.src];
+    if (src) src.addEventListener('change', () => {
+      const row = refData[fields.find(x => x.k === f.fillFrom.src).ref].get(Number(src.value));
+      if (row) inputs[f.k].value = row[f.fillFrom.prop];
+    });
+  }
+
+  const form = h('form', { novalidate: false },
+    h('h2', {}, title), rowsEl, err,
+    h('div', { class: 'modal-actions' },
+      h('button', { type: 'button', class: 'btn ghost', onclick: () => dlg.close() }, 'Cancel'),
+      h('button', { type: 'submit', class: 'btn primary' }, submitLabel)));
+
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const data = {};
+    for (const f of fields.filter(x => !x.ro)) {
+      const el = inputs[f.k];
+      if (f.t === 'bool') data[f.k] = el.checked;
+      else if (el.value === '') data[f.k] = null;
+      else data[f.k] = (f.t === 'number' || f.t === 'ref') ? Number(el.value) : el.value;
+    }
+    const btn = $('button[type=submit]', form);
+    btn.disabled = true; err.textContent = '';
+    try { await onSubmit(data); dlg.close(); }
+    catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+  });
+
+  dlg.append(form);
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  const first = $('input:not([type=checkbox]), select, textarea', form);
+  if (first) first.focus();
+}
+
+// ------------------------------------------------------------------ create / edit / delete
+function newRecord(key, extra = {}) {
+  const E = ENTITIES[key];
+  openForm({
+    title: 'New ' + E.single.toLowerCase(), fields: E.fields,
+    onSubmit: async d => { await api('POST', '/' + key, { ...d, ...extra }); invalidateRefs(); toast(E.single + ' saved'); render(); },
+  });
+}
+function editRecord(key, row) {
+  const E = ENTITIES[key];
+  openForm({
+    title: 'Edit ' + E.single.toLowerCase(), fields: E.fields, values: row,
+    onSubmit: async d => { await api('PUT', `/${key}/${row.id}`, d); invalidateRefs(); toast('Changes saved'); render(); },
+  });
+}
+async function deleteRecord(key, row, after) {
+  const E = ENTITIES[key];
+  if (!confirm(`Delete this ${E.single.toLowerCase()}?`)) return;
+  try { await api('DELETE', `/${key}/${row.id}`); invalidateRefs(); toast('Deleted'); (after || render)(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function runAction(a, row) {
+  if (a.confirm && !confirm(a.confirm)) return;
+  try {
+    const res = await api('POST', '/rpc/' + a.fn, a.body ? a.body(row) : { id: row.id });
+    invalidateRefs();
+    toast(a.done || 'Done');
+    if (a.link && res && res.invoice_id) location.hash = `#/${a.link}/${res.invoice_id}`; else render();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function runToolbar(t) {
+  openForm({
+    title: t.label, fields: t.fields, submitLabel: t.label,
+    onSubmit: async d => { await api('POST', '/rpc/' + t.fn, d); invalidateRefs(); toast(t.done || 'Done'); render(); },
+  });
+}
+
+const iconBtn = (label, onclick, cls = '') => h('button', { type: 'button', class: 'btn small ghost ' + cls, onclick }, label);
+
+// ------------------------------------------------------------------ list screen
+async function listPage(key) {
+  const E = ENTITIES[key];
+  await ensureRefs(refsFor(E, E.toolbar && { fields: E.toolbar.flatMap(t => t.fields) }));
+  const rows = await api('GET', '/' + key);
+  const canEdit = r => !E.readonly && (!E.editable || E.editable(r));
+  const hasId = rows.length === 0 || rows[0].id !== undefined;
+
+  const search = h('input', { type: 'search', class: 'search', placeholder: 'Search…', 'aria-label': 'Search this list' });
+  const bar = h('div', { class: 'bar' }, search, h('span', { class: 'grow' }),
+    (E.toolbar || []).map(t => h('button', { class: 'btn', onclick: () => runToolbar(t) }, t.label)),
+    !E.readonly ? h('button', { class: 'btn primary', onclick: () => newRecord(key) }, '+ New ' + E.single.toLowerCase()) : null);
+
+  const open = r => { location.hash = `#/${key}/${r.id}`; };
+  const tbl = table(E, rows, {
+    onRow: !hasId ? null : E.detail ? open : (E.readonly ? null : r => { if (canEdit(r)) editRecord(key, r); }),
+    rowButtons: !E.readonly && hasId ? r => [
+      canEdit(r) ? iconBtn('Edit', () => editRecord(key, r)) : null,
+      canEdit(r) ? iconBtn('Delete', () => deleteRecord(key, r), 'danger') : null,
+    ] : null,
+  });
+  search.addEventListener('input', () => {
+    const q = search.value.trim().toLowerCase();
+    for (const tr of $('tbody', tbl).rows) tr.hidden = q && !tr.textContent.toLowerCase().includes(q);
+  });
+  return h('div', {}, bar, tbl, h('p', { class: 'muted count' }, `${rows.length} record${rows.length === 1 ? '' : 's'}`));
+}
+
+// ------------------------------------------------------------------ detail screen (header + child lines)
+async function detailPage(key, id) {
+  const E = ENTITIES[key];
+  const C = ENTITIES[E.detail.child];
+  await ensureRefs(refsFor(E, C));
+  const [row, kids] = await Promise.all([api('GET', `/${key}/${id}`), api('GET', `/${E.detail.child}?${E.detail.fk}=${id}`)]);
+  const D = E.detail;
+  const mayEdit = !E.readonly && (!E.editable || E.editable(row));
+  const kidsEditable = !D.readonly && (!D.editable || D.editable(row));
+  const title = E.fields.find(f => f.k === 'number') ? row.number : (LABEL[key] ? LABEL[key](row) : E.single + ' #' + row.id);
+
+  const actions = (E.actions || []).filter(a => !a.show || a.show(row))
+    .map(a => h('button', { class: 'btn ' + (a.danger ? 'danger' : 'primary'), onclick: () => runAction(a, row) }, a.label));
+
+  const head = h('div', { class: 'detail-head' },
+    h('div', {}, h('a', { href: `#/${key}`, class: 'back' }, '← ' + E.title), h('h2', {}, title)),
+    h('div', { class: 'row-gap' }, mayEdit ? iconBtn('Edit', () => editRecord(key, row)) : null, actions));
+
+  const props = h('dl', { class: 'props' },
+    E.fields.map(f => [h('dt', {}, f.l), h('dd', {}, cell(f, row) || '—')]));
+
+  const childTable = table(C, kids, {
+    rowButtons: kidsEditable ? r => [
+      D.noEdit ? null : iconBtn('Edit', () => openForm({
+        title: 'Edit ' + C.single.toLowerCase(), fields: C.fields, values: r,
+        onSubmit: async d => { await api('PUT', `/${D.child}/${r.id}`, d); toast('Saved'); render(); },
+      })),
+      D.noEdit ? null : iconBtn('Delete', () => deleteRecord(D.child, r), 'danger'),
+    ] : null,
+  });
+
+  const total = (key === 'sales_order' || key === 'purchase_order') ? h('p', { class: 'total' }, 'Total ', h('strong', {}, fmtMoney(row.total))) : null;
+  // payments default to the outstanding balance; every other child just opens the generic form
+  const addHandler = key === 'invoice'
+    ? () => openForm({
+      title: 'Register payment', fields: C.fields, values: { amount: row.balance }, submitLabel: 'Register payment',
+      onSubmit: async d => { await api('POST', '/payment', { ...d, invoice_id: Number(id) }); toast('Payment registered'); render(); },
+    })
+    : () => newRecord(D.child, { [D.fk]: Number(id) });
+  const addBtn = kidsEditable ? h('button', { class: 'btn primary', onclick: addHandler }, '+ Add ' + C.single.toLowerCase()) : null;
+
+  return h('div', {}, head, h('div', { class: 'card' }, props),
+    h('div', { class: 'bar' }, h('h3', {}, D.title || C.title), h('span', { class: 'grow' }), addBtn),
+    childTable, total);
+}
+
+// ------------------------------------------------------------------ router
+let renderToken = 0;
+async function render() {
+  const my = ++renderToken;
+  const [key, id] = (location.hash.slice(2) || 'dashboard').split('/');
+  const view = $('#view');
+  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.key === key || (a.dataset.key === 'invoice' && key === 'payment')));
+  $('#sidebar').classList.remove('open');
+
+  const titles = { dashboard: 'Dashboard', pos: 'POS terminal' };
+  $('#pageTitle').textContent = titles[key] || (ENTITIES[key] && ENTITIES[key].title) || 'Not found';
+  document.title = $('#pageTitle').textContent + ' · StockMate';
+
+  try {
+    let node;
+    if (key === 'dashboard') node = await dashboardPage();
+    else if (key === 'pos') node = await posPage();
+    else if (ENTITIES[key] && id && ENTITIES[key].detail) node = await detailPage(key, id);
+    else if (ENTITIES[key]) node = await listPage(key);
+    else node = h('p', { class: 'muted' }, 'That page does not exist.');
+    if (my === renderToken) { view.replaceChildren(node); view.focus({ preventScroll: true }); }
+  } catch (e) {
+    if (my === renderToken) view.replaceChildren(h('div', { class: 'card err-card' }, h('strong', {}, 'Something went wrong. '), e.message));
+  }
+}
+
+function boot() {
+  const nav = $('#nav');
+  for (const g of MENU) {
+    nav.append(h('div', { class: 'nav-group' }, g.group),
+      ...g.items.map(([k, label]) => h('a', { href: '#/' + k, 'data-key': k }, label)));
+  }
+  $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+  window.addEventListener('hashchange', render);
+  render();
+}
