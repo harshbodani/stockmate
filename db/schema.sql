@@ -34,7 +34,15 @@ CREATE TABLE product (
   cost          numeric(12,2) NOT NULL DEFAULT 0 CHECK (cost >= 0),
   price         numeric(12,2) NOT NULL DEFAULT 0 CHECK (price >= 0),
   reorder_level numeric(14,3) NOT NULL DEFAULT 0,
-  active        boolean NOT NULL DEFAULT true
+  active        boolean NOT NULL DEFAULT true,
+  -- filtration specifications (used for searching and compatibility)
+  micron        numeric(8,2),          -- filtration rating in microns
+  size          text,                  -- e.g. 10 inch, 20 inch
+  material      text,                  -- e.g. polypropylene, cellulose
+  flow_rate     text,                  -- e.g. 500 LPH
+  fits_models   text,                  -- housings / machines this part fits
+  vendor_id     int REFERENCES partner(id),   -- preferred vendor for reordering
+  reorder_qty   numeric(14,3) NOT NULL DEFAULT 0   -- usual order quantity (0 = automatic suggestion)
 );
 
 -- current stock per product per warehouse
@@ -265,7 +273,7 @@ CREATE TABLE pos_sale_line (
 -- ---------- Views used by the screens ----------
 CREATE VIEW v_product AS
 SELECT p.*, COALESCE(s.qty, 0) AS on_hand,
-       COALESCE(s.qty, 0) <= p.reorder_level AND p.active AS low_stock
+       (p.reorder_level > 0 AND COALESCE(s.qty, 0) <= p.reorder_level AND p.active) AS low_stock
 FROM product p
 LEFT JOIN (SELECT product_id, sum(qty) AS qty FROM stock_quant GROUP BY product_id) s ON s.product_id = p.id;
 
@@ -308,3 +316,40 @@ CREATE INDEX ON sales_order_line (order_id);
 CREATE INDEX ON purchase_order_line (order_id);
 CREATE INDEX ON timesheet (employee_id, work_date);
 CREATE INDEX ON payment (invoice_id);
+
+-- ---------- Reports ----------
+-- Cost of a manufactured product = material cost from its bill of materials; bought items use their purchase cost.
+CREATE VIEW v_costing AS
+SELECT p.id, p.sku, p.name, p.price, b.id AS bom_id,
+       CASE WHEN b.id IS NULL THEN p.cost
+            ELSE round(COALESCE((SELECT sum(c.cost * bl.qty) FROM bom_line bl JOIN product c ON c.id = bl.component_id
+                                  WHERE bl.bom_id = b.id), 0) / b.output_qty, 2) END AS unit_cost,
+       p.price - CASE WHEN b.id IS NULL THEN p.cost
+            ELSE round(COALESCE((SELECT sum(c.cost * bl.qty) FROM bom_line bl JOIN product c ON c.id = bl.component_id
+                                  WHERE bl.bom_id = b.id), 0) / b.output_qty, 2) END AS margin,
+       CASE WHEN p.price > 0 THEN round(100 * (p.price - CASE WHEN b.id IS NULL THEN p.cost
+            ELSE round(COALESCE((SELECT sum(c.cost * bl.qty) FROM bom_line bl JOIN product c ON c.id = bl.component_id
+                                  WHERE bl.bom_id = b.id), 0) / b.output_qty, 2) END) / p.price, 1) END AS margin_pct
+FROM product p
+LEFT JOIN LATERAL (SELECT * FROM bom WHERE product_id = p.id ORDER BY id LIMIT 1) b ON true
+WHERE p.price > 0 AND p.active;
+
+-- Money customers owe us, grouped by how late it is
+CREATE VIEW v_ageing AS
+SELECT partner_id,
+       COALESCE(sum(CASE WHEN due_date >= current_date THEN balance END), 0)                          AS not_due,
+       COALESCE(sum(CASE WHEN current_date - due_date BETWEEN 1 AND 30 THEN balance END), 0)          AS d1_30,
+       COALESCE(sum(CASE WHEN current_date - due_date BETWEEN 31 AND 60 THEN balance END), 0)         AS d31_60,
+       COALESCE(sum(CASE WHEN current_date - due_date > 60 THEN balance END), 0)                      AS d61_plus,
+       sum(balance)                                                                                   AS total
+FROM (SELECT partner_id, due_date, total - paid AS balance FROM invoice WHERE kind = 'customer' AND status <> 'paid') i
+GROUP BY partner_id;
+
+-- Low-stock products that are not already on an open purchase order
+CREATE VIEW v_reorder AS
+SELECT p.id, p.sku, p.name, p.vendor_id, p.on_hand, p.reorder_level,
+       CASE WHEN p.reorder_qty > 0 THEN p.reorder_qty ELSE GREATEST(p.reorder_level * 2 - p.on_hand, 1) END AS suggested_qty
+FROM v_product p
+WHERE p.low_stock
+  AND NOT EXISTS (SELECT 1 FROM purchase_order_line l JOIN purchase_order o ON o.id = l.order_id
+                   WHERE l.product_id = p.id AND o.status IN ('draft','confirmed'));

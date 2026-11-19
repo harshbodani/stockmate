@@ -277,6 +277,41 @@ SELECT jsonb_build_object(
 );
 $$;
 
+-- ---------- Transfers & reordering ----------
+-- move stock between warehouses: {product_id, from_warehouse_id, to_warehouse_id, qty}
+CREATE OR REPLACE FUNCTION fn_transfer_stock(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE pid int := (p->>'product_id')::int; a int := (p->>'from_warehouse_id')::int;
+        b int := (p->>'to_warehouse_id')::int; q numeric := (p->>'qty')::numeric;
+BEGIN
+  IF a = b THEN RAISE EXCEPTION 'Choose two different warehouses'; END IF;
+  IF q IS NULL OR q <= 0 THEN RAISE EXCEPTION 'Quantity must be more than zero'; END IF;
+  PERFORM fn_stock_move(pid, a, -q, 'transfer_out');
+  PERFORM fn_stock_move(pid, b,  q, 'transfer_in');
+  RETURN jsonb_build_object('ok', true);
+END $$;
+
+-- one draft purchase order per preferred vendor for everything on the reorder list: {warehouse_id}
+CREATE OR REPLACE FUNCTION fn_reorder_create_pos(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE v record; r record; po_id int; po_num text; wh int := (p->>'warehouse_id')::int;
+        orders int := 0; lines int := 0; nums text[] := '{}';
+BEGIN
+  IF wh IS NULL THEN RAISE EXCEPTION 'Choose the warehouse to deliver to'; END IF;
+  FOR v IN SELECT DISTINCT vendor_id FROM v_reorder WHERE vendor_id IS NOT NULL LOOP
+    INSERT INTO purchase_order (partner_id, warehouse_id, notes)
+    VALUES (v.vendor_id, wh, 'Created from reorder suggestions') RETURNING id, number INTO po_id, po_num;
+    FOR r IN SELECT ro.id, ro.suggested_qty, pr.cost FROM v_reorder ro JOIN product pr ON pr.id = ro.id
+              WHERE ro.vendor_id = v.vendor_id LOOP
+      INSERT INTO purchase_order_line (order_id, product_id, qty, unit_cost) VALUES (po_id, r.id, r.suggested_qty, r.cost);
+      lines := lines + 1;
+    END LOOP;
+    orders := orders + 1; nums := nums || po_num;
+  END LOOP;
+  IF orders = 0 THEN
+    RAISE EXCEPTION 'Nothing to reorder: no low-stock product with a preferred vendor that is not already on an open order';
+  END IF;
+  RETURN jsonb_build_object('orders', orders, 'lines', lines, 'numbers', to_jsonb(nums));
+END $$;
+
 -- ---------- Generic CRUD helpers used by the Java API ----------
 -- The table name is checked against a fixed whitelist in Java and quoted with %I here.
 CREATE OR REPLACE FUNCTION api_insert(t text, body jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$

@@ -57,11 +57,14 @@ const ENTITIES = {
     title: 'Products', single: 'Product',
     fields: [F.text('sku', 'SKU', { req: 1 }), F.text('barcode', 'Barcode'), F.text('name', 'Name', { req: 1 }),
              F.text('category', 'Category'), F.text('unit', 'Unit'),
+             F.num('micron', 'Micron rating', { step: '0.01' }), F.text('size', 'Size'), F.text('material', 'Material'),
+             F.text('flow_rate', 'Flow rate'), F.area('fits_models', 'Fits / compatible with'),
              F.money('cost', 'Cost'), F.money('price', 'Sale price'),
-             F.num('reorder_level', 'Reorder level'), F.bool('active', 'Active'),
+             F.num('reorder_level', 'Reorder level'), F.num('reorder_qty', 'Usual reorder quantity (0 = automatic)'),
+             F.ref('vendor_id', 'Preferred vendor', 'partner'), F.bool('active', 'Active'),
              { k: 'on_hand', l: 'On hand', t: 'number', ro: 1,
                fmt: r => ({ text: fmtNum(r.on_hand), cls: r.low_stock ? 'low' : '' }) }],
-    cols: ['sku', 'name', 'category', 'on_hand', 'reorder_level', 'cost', 'price'],
+    cols: ['sku', 'name', 'micron', 'size', 'fits_models', 'on_hand', 'cost', 'price'],
   },
 
   stock: {
@@ -72,6 +75,10 @@ const ENTITIES = {
       label: 'Adjust stock', fn: 'fn_adjust_stock', done: 'Stock adjusted',
       fields: [F.ref('product_id', 'Product', 'product', { req: 1 }), F.ref('warehouse_id', 'Warehouse', 'warehouse', { req: 1 }),
                F.num('qty', 'Quantity (use a minus sign to remove stock)', { req: 1, step: 'any' })],
+    }, {
+      label: 'Transfer stock', fn: 'fn_transfer_stock', done: 'Stock transferred',
+      fields: [F.ref('product_id', 'Product', 'product', { req: 1 }), F.ref('from_warehouse_id', 'From warehouse', 'warehouse', { req: 1 }),
+               F.ref('to_warehouse_id', 'To warehouse', 'warehouse', { req: 1 }), F.num('qty', 'Quantity', { req: 1, step: 'any' })],
     }],
   },
 
@@ -294,15 +301,47 @@ const ENTITIES = {
   },
 };
 
+// ---------------- Reports (read-only views)
+ENTITIES.costing = {
+  title: 'Costing & margin', readonly: true,
+  fields: [F.text('sku', 'SKU'), F.text('name', 'Product'), F.money('price', 'Sale price'), F.money('unit_cost', 'Unit cost'),
+           { k: 'margin', l: 'Margin', t: 'number', m: 1, fmt: r => ({ text: fmtMoney(r.margin), cls: Number(r.margin) < 0 ? 'low' : '' }) },
+           { k: 'margin_pct', l: 'Margin %', t: 'number', fmt: r => ({ text: r.margin_pct == null ? '' : r.margin_pct + '%', cls: Number(r.margin_pct) < 20 ? 'low' : '' }) }],
+  cols: ['sku', 'name', 'price', 'unit_cost', 'margin', 'margin_pct'],
+  note: 'Cost of manufactured products is the material cost from their bill of materials; bought items use their purchase cost.',
+};
+
+ENTITIES.ageing = {
+  title: 'Receivables ageing', readonly: true,
+  fields: [F.ref('partner_id', 'Customer', 'partner'), F.money('not_due', 'Not yet due'), F.money('d1_30', '1–30 days late'),
+           F.money('d31_60', '31–60 days late'), F.money('d61_plus', '61+ days late'), F.money('total', 'Total owed')],
+  cols: ['partner_id', 'not_due', 'd1_30', 'd31_60', 'd61_plus', 'total'],
+  note: 'Unpaid customer invoices grouped by how long past the due date they are.',
+};
+
+ENTITIES.reorder = {
+  title: 'Reorder suggestions', readonly: true,
+  fields: [F.text('sku', 'SKU'), F.text('name', 'Product'), F.ref('vendor_id', 'Preferred vendor', 'partner'),
+           { k: 'on_hand', l: 'On hand', t: 'number', fmt: r => ({ text: fmtNum(r.on_hand), cls: 'low' }) },
+           F.num('reorder_level', 'Reorder level'), F.num('suggested_qty', 'Suggested order qty')],
+  cols: ['sku', 'name', 'vendor_id', 'on_hand', 'reorder_level', 'suggested_qty'],
+  note: 'Low-stock products that are not already on an open purchase order. Products without a preferred vendor are skipped when creating orders.',
+  toolbar: [{
+    label: 'Create purchase orders', fn: 'fn_reorder_create_pos', done: 'Draft purchase orders created',
+    fields: [F.ref('warehouse_id', 'Deliver to', 'warehouse', { req: 1 })],
+  }],
+};
+
 // Sidebar structure. A string is an entity key; special pages are handled in app.js.
 const MENU = [
   { group: 'Overview', items: [['dashboard', 'Dashboard']] },
   { group: 'Sales & CRM', items: [['crm_lead', 'Leads'], ['sales_order', 'Sales orders'], ['partner', 'Customers & vendors']] },
   { group: 'Purchases & Stock', items: [['purchase_order', 'Purchase orders'], ['product', 'Products'], ['stock', 'Stock'],
-                                         ['stock_move', 'Stock movements'], ['warehouse', 'Warehouses']] },
+                                         ['stock_move', 'Stock movements'], ['reorder', 'Reorder suggestions'], ['warehouse', 'Warehouses']] },
   { group: 'Invoicing', items: [['invoice', 'Invoices & payments']] },
   { group: 'Manufacturing', items: [['production_order', 'Production orders'], ['bom', 'Bills of materials'], ['work_center', 'Work centers']] },
   { group: 'Projects', items: [['project', 'Projects'], ['timesheet', 'Timesheets']] },
   { group: 'Human Resources', items: [['employee', 'Employees'], ['payslip', 'Payslips']] },
+  { group: 'Reports', items: [['costing', 'Costing & margin'], ['ageing', 'Receivables ageing']] },
   { group: 'Point of Sale', items: [['pos', 'POS terminal'], ['pos_sale', 'POS sales'], ['cash_register', 'Cash registers']] },
 ];

@@ -51,11 +51,12 @@ public final class Api implements HttpHandler {
         rw("project", "v_project"); rw("task"); rw("timesheet", "v_timesheet");
         rw("employee"); ro("payslip", "payslip");
         rw("cash_register"); ro("pos_sale", "pos_sale"); ro("pos_sale_line", "pos_sale_line");
+        ro("costing", "v_costing"); ro("ageing", "v_ageing"); ro("reorder", "v_reorder");
     }
 
     /** Functions in db/functions.sql that the browser is allowed to call. */
     private static final Set<String> RPC = Set.of(
-            "fn_adjust_stock", "fn_crm_convert",
+            "fn_adjust_stock", "fn_transfer_stock", "fn_reorder_create_pos", "fn_crm_convert",
             "fn_so_confirm", "fn_so_deliver", "fn_so_cancel",
             "fn_po_confirm", "fn_po_receive", "fn_po_cancel",
             "fn_create_invoice",

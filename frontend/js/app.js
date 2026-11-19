@@ -117,7 +117,8 @@ function table(E, rows, { onRow, rowButtons } = {}) {
 }
 
 // ------------------------------------------------------------------ forms (native <dialog>)
-function openForm({ title, fields, values = {}, submitLabel = 'Save', onSubmit }) {
+async function openForm({ title, fields, values = {}, submitLabel = 'Save', onSubmit }) {
+  await ensureRefs(refsFor({ fields })); // dropdown data may have just been cleared by a save
   const dlg = h('dialog', { class: 'modal' });
   const err = h('p', { class: 'form-err', role: 'alert' });
   const inputs = {};
@@ -226,6 +227,21 @@ function runToolbar(t) {
   });
 }
 
+function exportCsv(E, rows, name) {
+  const cols = E.cols.map(k => fieldOf(E, k));
+  const raw = (f, r) => {
+    if (f.fmt) return f.fmt(r).text;
+    const v = r[f.k];
+    if (v == null) return '';
+    return f.t === 'ref' ? refText(f.ref, v) : String(v);
+  };
+  const q = s => '"' + String(s).replace(/"/g, '""') + '"';
+  const csv = [cols.map(f => q(f.l)).join(','), ...rows.map(r => cols.map(f => q(raw(f, r))).join(','))].join('\r\n');
+  const url = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }));
+  const a = h('a', { href: url, download: name + '.csv' });
+  document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
 const iconBtn = (label, onclick, cls = '') => h('button', { type: 'button', class: 'btn small ghost ' + cls, onclick }, label);
 
 // ------------------------------------------------------------------ list screen
@@ -238,6 +254,7 @@ async function listPage(key) {
 
   const search = h('input', { type: 'search', class: 'search', placeholder: 'Search…', 'aria-label': 'Search this list' });
   const bar = h('div', { class: 'bar' }, search, h('span', { class: 'grow' }),
+    h('button', { class: 'btn', onclick: () => exportCsv(E, rows, key) }, 'Export CSV'),
     (E.toolbar || []).map(t => h('button', { class: 'btn', onclick: () => runToolbar(t) }, t.label)),
     !E.readonly ? h('button', { class: 'btn primary', onclick: () => newRecord(key) }, '+ New ' + E.single.toLowerCase()) : null);
 
@@ -253,7 +270,7 @@ async function listPage(key) {
     const q = search.value.trim().toLowerCase();
     for (const tr of $('tbody', tbl).rows) tr.hidden = q && !tr.textContent.toLowerCase().includes(q);
   });
-  return h('div', {}, bar, tbl, h('p', { class: 'muted count' }, `${rows.length} record${rows.length === 1 ? '' : 's'}`));
+  return h('div', {}, E.note ? h('p', { class: 'muted' }, E.note) : null, bar, tbl, h('p', { class: 'muted count' }, `${rows.length} record${rows.length === 1 ? '' : 's'}`));
 }
 
 // ------------------------------------------------------------------ detail screen (header + child lines)

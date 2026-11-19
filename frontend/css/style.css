@@ -81,6 +81,7 @@ tr.overdue td:first-child { box-shadow: inset 3px 0 var(--danger); }
 .b-confirmed, .b-qualified, .b-in_progress, .b-doing, .b-partial, .b-proposal, .b-card, .b-upi { background: #dbeafe; color: #1e40af; }
 .b-delivered, .b-received, .b-done, .b-paid, .b-won, .b-active, .b-open, .b-purchase, .b-production_in, .b-customer { background: #dcfce7; color: #166534; }
 .b-cancelled, .b-lost, .b-closed, .b-sale, .b-production_out, .b-pos { background: #fee2e2; color: #991b1b; }
+.b-transfer_in { background: #dcfce7; color: #166534; } .b-transfer_out { background: #fee2e2; color: #991b1b; }
 .b-draft, .b-new, .b-planned, .b-todo, .b-on_hold, .b-vendor, .b-adjustment { background: #fef3c7; color: #92400e; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .badge { filter: brightness(.9) saturate(1.1); }
