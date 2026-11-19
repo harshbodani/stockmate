@@ -39,6 +39,12 @@ function todayISO() {
 function monthStartISO() { return todayISO().slice(0, 8) + '01'; }
 const pretty = s => String(s).replace(/_/g, ' ');
 
+// ------------------------------------------------------------------ who is signed in
+let ME = null; // { username, full_name, role, can_read[], can_write[], can_rpc[] }
+const canRead = key => !!ME && ME.can_read.includes(key);
+const canWrite = key => !!ME && ME.can_write.includes(key);
+const canRpc = fn => !!ME && ME.can_rpc.includes(fn);
+
 // ------------------------------------------------------------------ server calls
 async function api(method, path, body) {
   const res = await fetch('/api' + path, {
@@ -49,6 +55,7 @@ async function api(method, path, body) {
   const text = await res.text();
   let data = null;
   try { data = JSON.parse(text); } catch (e) { /* not JSON */ }
+  if (res.status === 401 && path !== '/login' && path !== '/me') { ME = null; showLogin('Your session ended. Please sign in again.'); }
   if (!res.ok) throw new Error((data && data.error) || res.statusText || 'Request failed');
   return data;
 }
@@ -138,7 +145,7 @@ async function openForm({ title, fields, values = {}, submitLabel = 'Save', onSu
         : [...refData[f.ref].values()].map(r => [r.id, LABEL[f.ref](r)]);
       for (const [val, text] of opts) input.append(h('option', { value: val }, text));
     } else if (f.t === 'bool') input = h('input', { id, type: 'checkbox' });
-    else input = h('input', { id, type: f.t === 'number' ? 'number' : f.t === 'date' ? 'date' : 'text', step: f.t === 'number' ? (f.step || 'any') : null });
+    else input = h('input', { id, type: f.t === 'number' ? 'number' : f.t === 'date' ? 'date' : f.t === 'password' ? 'password' : 'text', autocomplete: f.t === 'password' ? 'new-password' : null, step: f.t === 'number' ? (f.step || 'any') : null });
 
     if (f.req) input.required = true;
     if (f.t === 'bool') input.checked = v === undefined ? true : !!v;
@@ -249,19 +256,20 @@ async function listPage(key) {
   const E = ENTITIES[key];
   await ensureRefs(refsFor(E, E.toolbar && { fields: E.toolbar.flatMap(t => t.fields) }));
   const rows = await api('GET', '/' + key);
-  const canEdit = r => !E.readonly && (!E.editable || E.editable(r));
+  const canMake = !E.readonly && canWrite(key);
+  const canEdit = r => canMake && (!E.editable || E.editable(r));
   const hasId = rows.length === 0 || rows[0].id !== undefined;
 
   const search = h('input', { type: 'search', class: 'search', placeholder: 'Search…', 'aria-label': 'Search this list' });
   const bar = h('div', { class: 'bar' }, search, h('span', { class: 'grow' }),
     h('button', { class: 'btn', onclick: () => exportCsv(E, rows, key) }, 'Export CSV'),
-    (E.toolbar || []).map(t => h('button', { class: 'btn', onclick: () => runToolbar(t) }, t.label)),
-    !E.readonly ? h('button', { class: 'btn primary', onclick: () => newRecord(key) }, '+ New ' + E.single.toLowerCase()) : null);
+    (E.toolbar || []).filter(t => canRpc(t.fn)).map(t => h('button', { class: 'btn', onclick: () => runToolbar(t) }, t.label)),
+    canMake ? h('button', { class: 'btn primary', onclick: () => newRecord(key) }, '+ New ' + E.single.toLowerCase()) : null);
 
   const open = r => { location.hash = `#/${key}/${r.id}`; };
   const tbl = table(E, rows, {
-    onRow: !hasId ? null : E.detail ? open : (E.readonly ? null : r => { if (canEdit(r)) editRecord(key, r); }),
-    rowButtons: !E.readonly && hasId ? r => [
+    onRow: !hasId ? null : E.detail ? open : (canMake ? r => { if (canEdit(r)) editRecord(key, r); } : null),
+    rowButtons: canMake && hasId ? r => [
       canEdit(r) ? iconBtn('Edit', () => editRecord(key, r)) : null,
       canEdit(r) ? iconBtn('Delete', () => deleteRecord(key, r), 'danger') : null,
     ] : null,
@@ -280,11 +288,11 @@ async function detailPage(key, id) {
   await ensureRefs(refsFor(E, C));
   const [row, kids] = await Promise.all([api('GET', `/${key}/${id}`), api('GET', `/${E.detail.child}?${E.detail.fk}=${id}`)]);
   const D = E.detail;
-  const mayEdit = !E.readonly && (!E.editable || E.editable(row));
-  const kidsEditable = !D.readonly && (!D.editable || D.editable(row));
+  const mayEdit = !E.readonly && canWrite(key) && (!E.editable || E.editable(row));
+  const kidsEditable = !D.readonly && canWrite(D.child) && (!D.editable || D.editable(row));
   const title = E.fields.find(f => f.k === 'number') ? row.number : (LABEL[key] ? LABEL[key](row) : E.single + ' #' + row.id);
 
-  const actions = (E.actions || []).filter(a => !a.show || a.show(row))
+  const actions = (E.actions || []).filter(a => canRpc(a.fn) && (!a.show || a.show(row)))
     .map(a => h('button', { class: 'btn ' + (a.danger ? 'danger' : 'primary'), onclick: () => runAction(a, row) }, a.label));
 
   const head = h('div', { class: 'detail-head' },
@@ -334,24 +342,67 @@ async function render() {
 
   try {
     let node;
-    if (key === 'dashboard') node = await dashboardPage();
-    else if (key === 'pos') node = await posPage();
+    if (key === 'dashboard') node = ME.can_dashboard ? await dashboardPage() : h('div', { class: 'card' }, 'Your role does not have access to the dashboard.');
+    else if (key === 'pos') node = canRpc('fn_pos_checkout') ? await posPage() : h('div', { class: 'card' }, 'Your role does not have access to the POS terminal.');
+    else if (ENTITIES[key] && !canRead(key)) node = h('div', { class: 'card' }, 'Your role does not have access to this page.');
     else if (ENTITIES[key] && id && ENTITIES[key].detail) node = await detailPage(key, id);
     else if (ENTITIES[key]) node = await listPage(key);
     else node = h('p', { class: 'muted' }, 'That page does not exist.');
-    if (my === renderToken) { view.replaceChildren(node); view.focus({ preventScroll: true }); }
+    if (my === renderToken) { view.replaceChildren(node); view.dataset.page = key + (id ? '/' + id : ''); view.focus({ preventScroll: true }); }
   } catch (e) {
     if (my === renderToken) view.replaceChildren(h('div', { class: 'card err-card' }, h('strong', {}, 'Something went wrong. '), e.message));
   }
 }
 
-function boot() {
+function buildNav() {
   const nav = $('#nav');
+  nav.replaceChildren();
   for (const g of MENU) {
+    const items = g.items.filter(([k]) => (k === 'dashboard' ? ME.can_dashboard : k === 'pos' ? canRpc('fn_pos_checkout') : canRead(k)));
+    if (!items.length) continue;
     nav.append(h('div', { class: 'nav-group' }, g.group),
-      ...g.items.map(([k, label]) => h('a', { href: '#/' + k, 'data-key': k }, label)));
+      ...items.map(([k, label]) => h('a', { href: '#/' + k, 'data-key': k }, label)));
   }
-  $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
-  window.addEventListener('hashchange', render);
+}
+
+function showLogin(message) {
+  document.body.classList.add('locked');
+  $('#loginErr').textContent = message || '';
+  $('#loginUser').focus();
+}
+
+async function startApp() {
+  ME = await api('GET', '/me');
+  invalidateRefs();
+  document.body.classList.remove('locked');
+  $('#userName').textContent = `${ME.full_name || ME.username} · ${ME.role}`;
+  buildNav();
+  if (!ME.can_dashboard && (location.hash === '' || location.hash === '#/dashboard')) location.hash = '#/pos';
   render();
+}
+
+async function boot() {
+  $('#menuBtn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+  window.addEventListener('hashchange', () => { if (ME) render(); });
+
+  $('#loginForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    $('#loginErr').textContent = '';
+    try {
+      await api('POST', '/login', { username: $('#loginUser').value, password: $('#loginPass').value });
+      $('#loginPass').value = '';
+      await startApp();
+    } catch (err) { $('#loginErr').textContent = err.message; }
+  });
+  $('#logoutBtn').addEventListener('click', async () => {
+    try { await api('POST', '/logout', {}); } catch (e) { /* already signed out */ }
+    ME = null; invalidateRefs(); $('#view').replaceChildren(); location.hash = '#/dashboard'; showLogin();
+  });
+  $('#pwBtn').addEventListener('click', () => openForm({
+    title: 'Change password', submitLabel: 'Change password',
+    fields: [F.pass('old_password', 'Current password', { req: 1 }), F.pass('new_password', 'New password (8+ characters)', { req: 1 })],
+    onSubmit: async d => { await api('POST', '/password', d); toast('Password changed'); },
+  }));
+
+  try { await startApp(); } catch (e) { showLogin(); }
 }

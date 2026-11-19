@@ -312,6 +312,74 @@ BEGIN
   RETURN jsonb_build_object('orders', orders, 'lines', lines, 'numbers', to_jsonb(nums));
 END $$;
 
+-- ---------- Users & login ----------
+-- {username, password} -> {username, full_name, role}
+CREATE OR REPLACE FUNCTION fn_login(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE u app_user%ROWTYPE;
+BEGIN
+  SELECT * INTO u FROM app_user WHERE username = lower(trim(COALESCE(p->>'username', ''))) AND active;
+  IF NOT FOUND THEN
+    PERFORM crypt('x', gen_salt('bf', 10));   -- same cost whether or not the user exists
+    RAISE EXCEPTION 'Wrong username or password';
+  END IF;
+  IF u.password_hash <> crypt(COALESCE(p->>'password', ''), u.password_hash) THEN
+    RAISE EXCEPTION 'Wrong username or password';
+  END IF;
+  RETURN jsonb_build_object('username', u.username, 'full_name', u.full_name, 'role', u.role);
+END $$;
+
+-- {username, full_name, role, password}
+CREATE OR REPLACE FUNCTION fn_create_user(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE pw text := COALESCE(p->>'password', ''); uid int;
+BEGIN
+  IF length(pw) < 8 THEN RAISE EXCEPTION 'Password must be at least 8 characters'; END IF;
+  IF p->>'role' IS NULL OR p->>'role' NOT IN ('admin','sales','store','accounts','hr','cashier','viewer') THEN
+    RAISE EXCEPTION 'Unknown role';
+  END IF;
+  IF length(trim(COALESCE(p->>'username', ''))) < 3 THEN RAISE EXCEPTION 'Username must be at least 3 letters'; END IF;
+  INSERT INTO app_user (username, full_name, role, password_hash)
+  VALUES (lower(trim(p->>'username')), p->>'full_name', p->>'role', crypt(pw, gen_salt('bf', 10)))
+  RETURNING id INTO uid;
+  RETURN jsonb_build_object('id', uid);
+EXCEPTION WHEN unique_violation THEN
+  RAISE EXCEPTION 'That username is already taken';
+END $$;
+
+-- admin resets someone's password: {id, password}
+CREATE OR REPLACE FUNCTION fn_set_password(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE pw text := COALESCE(p->>'password', '');
+BEGIN
+  IF length(pw) < 8 THEN RAISE EXCEPTION 'Password must be at least 8 characters'; END IF;
+  UPDATE app_user SET password_hash = crypt(pw, gen_salt('bf', 10)) WHERE id = (p->>'id')::int;
+  IF NOT FOUND THEN RAISE EXCEPTION 'User not found'; END IF;
+  RETURN jsonb_build_object('ok', true);
+END $$;
+
+-- a user changes their own password: ('name', {old_password, new_password})
+CREATE OR REPLACE FUNCTION fn_change_password(uname text, p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE u app_user%ROWTYPE; pw text := COALESCE(p->>'new_password', '');
+BEGIN
+  SELECT * INTO u FROM app_user WHERE username = uname AND active;
+  IF NOT FOUND OR u.password_hash <> crypt(COALESCE(p->>'old_password', ''), u.password_hash) THEN
+    RAISE EXCEPTION 'Current password is wrong';
+  END IF;
+  IF length(pw) < 8 THEN RAISE EXCEPTION 'New password must be at least 8 characters'; END IF;
+  UPDATE app_user SET password_hash = crypt(pw, gen_salt('bf', 10)) WHERE id = u.id;
+  RETURN jsonb_build_object('ok', true);
+END $$;
+
+-- activate / deactivate a user: {id, active}; there must always be one active admin left
+CREATE OR REPLACE FUNCTION fn_set_user_active(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE uid int := (p->>'id')::int; flag boolean := (p->>'active')::boolean;
+BEGIN
+  UPDATE app_user SET active = flag WHERE id = uid;
+  IF NOT FOUND THEN RAISE EXCEPTION 'User not found'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM app_user WHERE role = 'admin' AND active) THEN
+    RAISE EXCEPTION 'At least one active admin is required';
+  END IF;
+  RETURN jsonb_build_object('ok', true);
+END $$;
+
 -- ---------- Generic CRUD helpers used by the Java API ----------
 -- The table name is checked against a fixed whitelist in Java and quoted with %I here.
 CREATE OR REPLACE FUNCTION api_insert(t text, body jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$

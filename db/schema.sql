@@ -1,6 +1,8 @@
 -- StockMate: database schema (PostgreSQL 14+)
 -- Modules: Core/Stock, CRM, Sales, Purchases, Invoicing, Manufacturing, Projects, HR, POS
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- password hashing (bcrypt)
+
 CREATE SEQUENCE so_seq;
 CREATE SEQUENCE po_seq;
 CREATE SEQUENCE inv_seq;
@@ -353,3 +355,28 @@ FROM v_product p
 WHERE p.low_stock
   AND NOT EXISTS (SELECT 1 FROM purchase_order_line l JOIN purchase_order o ON o.id = l.order_id
                    WHERE l.product_id = p.id AND o.status IN ('draft','confirmed'));
+
+-- ---------- Users, roles and audit trail ----------
+CREATE TABLE app_user (
+  id            serial PRIMARY KEY,
+  username      text NOT NULL UNIQUE CHECK (username = lower(username) AND length(username) >= 3),
+  full_name     text,
+  role          text NOT NULL CHECK (role IN ('admin','sales','store','accounts','hr','cashier','viewer')),
+  password_hash text NOT NULL,
+  active        boolean NOT NULL DEFAULT true,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE audit_log (
+  id       bigserial PRIMARY KEY,
+  at       timestamptz NOT NULL DEFAULT now(),
+  username text NOT NULL,
+  action   text NOT NULL,   -- e.g. POST, PUT, DELETE, ACTION
+  target   text NOT NULL    -- e.g. sales_order/5 or fn_so_deliver
+);
+CREATE INDEX ON audit_log (at DESC);
+
+-- the password hash never leaves the database
+CREATE VIEW v_app_user AS SELECT id, username, full_name, role, active, created_at FROM app_user;
+-- names only, so people without HR access can still see who a task is assigned to
+CREATE VIEW v_staff AS SELECT id, name, job_title, active FROM employee;

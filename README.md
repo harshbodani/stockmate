@@ -23,7 +23,29 @@ Project Management, Human Resources and Point of Sale** in one database, built f
    export DB_URL=jdbc:postgresql://localhost:5432/stockmate DB_USER=postgres DB_PASS=yourpassword
    ./run.sh
    ```
-4. Open <http://localhost:8080>
+4. Open <http://localhost:8080> and sign in (demo accounts below).
+
+> PostgreSQL needs the `pgcrypto` extension (included with the standard installers). `schema.sql` enables it
+> automatically; the database owner or a superuser must be allowed to run `CREATE EXTENSION`.
+
+## Sign-in and roles
+
+Demo accounts (created by `seed.sql`; **change the passwords** under Users → Reset password before real use):
+
+| Username | Password | Role | Can do |
+|----------|----------|------|--------|
+| admin | admin123 | admin | everything, manage users, audit log |
+| sales | sales123 | sales | leads, customers, sales orders |
+| store | store123 | store | products, stock, purchasing, manufacturing, deliveries |
+| accounts | accounts123 | accounts | create invoices, register payments |
+| hrdesk | hr123456 | hr | employees, payslips |
+| cashier | cashier123 | cashier | POS terminal only |
+| viewer | viewer123 | viewer | read-only |
+
+Projects, tasks and timesheets can be edited by sales, store, accounts and hr. Passwords are stored as bcrypt hashes
+(never in plain text). Sessions use an HttpOnly, SameSite=Strict cookie; a deactivated user is locked out immediately;
+10 wrong passwords from one address in 10 minutes blocks further attempts for a while. Every change is written to the audit log.
+The rules live in one file: `backend/src/main/java/com/stockmate/Permissions.java`.
 
 Environment variables: `PORT` (8080), `DB_URL`, `DB_USER` (postgres), `DB_PASS`, `FRONTEND_DIR`.
 
@@ -32,8 +54,8 @@ Environment variables: `PORT` (8080), `DB_URL`, `DB_USER` (postgres), `DB_PASS`,
 ```
 db/schema.sql      tables, constraints, views
 db/functions.sql   business logic in PL/pgSQL (stock moves, deliver/receive, invoicing, production, payroll, POS)
-db/seed.sql        demo data for a filter business
-backend/           Java server: routes /api/... requests to the database, serves the frontend
+db/seed.sql        demo data for a filter business and the demo logins
+backend/           Java server: Api (routes), Auth (sessions), Permissions (roles), JdbcDatabase; serves the frontend
 frontend/          single-page app: config.js (screen definitions), app.js (generic screens), dashboard.js, pos.js
 ```
 
@@ -52,6 +74,15 @@ The frontend is driven by `config.js`, a description of each screen, so adding a
 | Project Management | Projects, Tasks, Timesheets | Task status, hours logged per project, progress |
 | Human Resources | Employees, Payslips | Payslip = timesheet hours × hourly rate − deductions % |
 | Point of Sale | POS terminal, POS sales, Cash registers | Barcode scan, discount, cash/card/UPI, stock and cash drawer updated together |
+
+### Filtration-specific features
+
+- **Product specifications:** micron rating, size, material, flow rate and "fits / compatible with", searchable in the product list.
+- **Costing & margin:** unit cost of manufactured products from their bill of materials, margin and margin % per product.
+- **Receivables ageing:** what each customer owes, in not-due / 1–30 / 31–60 / 61+ days late buckets.
+- **Reorder suggestions:** low-stock products not already on an open order; one click creates a draft purchase order per preferred vendor.
+- **Warehouse transfers:** move stock between the Main Warehouse and Production Store, logged on both sides.
+- **CSV export** on every list.
 
 Dashboard: stock value, low-stock count, money to collect/pay, today's POS sales, open orders, 7-day sales chart, reorder list, recent movements.
 
@@ -73,9 +104,11 @@ POST   /api/{entity}                  create                       PUT/DELETE /a
 
 ## Known limits / future work
 
-- No login or roles yet (add user table + sessions, or put it behind a reverse proxy with authentication).
-- Single currency (INR), no taxes (GST) or multi-company support.
-- Reports are on screen; PDF export of invoices and payslips would be a natural next step.
+- Not done yet: batch/lot tracking, quotations (enquiry → quote → order), GST (HSN codes, CGST/SGST/IGST), quality-control records,
+  customer replacement reminders, credit notes and PDF export of invoices and payslips.
+- Single currency (INR) and a single company.
+- Sessions are kept in server memory, so everyone is signed out when the server restarts.
+- Serve it over HTTPS (for example behind a reverse proxy) before exposing it beyond a local network.
 
 ## Credits
 

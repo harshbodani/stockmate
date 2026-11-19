@@ -98,3 +98,12 @@ SELECT fn_so_confirm('{"id":3}');
 SELECT fn_so_deliver('{"id":3}');
 SELECT fn_create_invoice('{"kind":"sales","order_id":3}');
 UPDATE invoice SET issue_date = current_date - 75, due_date = current_date - 45 WHERE sales_order_id = 3;
+
+-- demo logins (CHANGE THESE before using StockMate for real work)
+SELECT fn_create_user('{"username":"admin","full_name":"Administrator","role":"admin","password":"admin123"}');
+SELECT fn_create_user('{"username":"sales","full_name":"Meena Shah","role":"sales","password":"sales123"}');
+SELECT fn_create_user('{"username":"store","full_name":"Kiran Joshi","role":"store","password":"store123"}');
+SELECT fn_create_user('{"username":"accounts","full_name":"Accounts Desk","role":"accounts","password":"accounts123"}');
+SELECT fn_create_user('{"username":"hrdesk","full_name":"HR Desk","role":"hr","password":"hr123456"}');
+SELECT fn_create_user('{"username":"cashier","full_name":"Counter 1","role":"cashier","password":"cashier123"}');
+SELECT fn_create_user('{"username":"viewer","full_name":"Read-only guest","role":"viewer","password":"viewer123"}');

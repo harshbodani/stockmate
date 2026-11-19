@@ -21,6 +21,8 @@ const LABEL = {
   task: r => r.title,
   cash_register: r => r.name,
   crm_lead: r => r.title,
+  staff: r => r.name,
+  app_user: r => `${r.username} (${r.role})`,
 };
 
 const STATUS_OPTS = {
@@ -37,6 +39,7 @@ const F = {
   sel: (k, l, opts, o = {}) => ({ k, l, t: 'select', opts, ...o }),
   ref: (k, l, ref, o = {}) => ({ k, l, t: 'ref', ref, ...o }),
   bool: (k, l, o = {}) => ({ k, l, t: 'bool', ...o }),
+  pass: (k, l, o = {}) => ({ k, l, t: 'password', ...o }),
 };
 
 const ENTITIES = {
@@ -244,14 +247,14 @@ const ENTITIES = {
 
   task: {
     title: 'Tasks', single: 'Task',
-    fields: [F.text('title', 'Task', { req: 1 }), F.ref('employee_id', 'Assigned to', 'employee'),
+    fields: [F.text('title', 'Task', { req: 1 }), F.ref('employee_id', 'Assigned to', 'staff'),
              F.sel('status', 'Status', ['todo', 'doing', 'done'], { badge: 1 }), F.num('est_hours', 'Estimated hours', { step: '0.25' })],
     cols: ['title', 'employee_id', 'status', 'est_hours'],
   },
 
   timesheet: {
     title: 'Timesheets', single: 'Time entry',
-    fields: [F.ref('task_id', 'Task', 'task', { req: 1 }), F.ref('employee_id', 'Employee', 'employee', { req: 1 }),
+    fields: [F.ref('task_id', 'Task', 'task', { req: 1 }), F.ref('employee_id', 'Employee', 'staff', { req: 1 }),
              F.date('work_date', 'Date'), F.num('hours', 'Hours', { req: 1, step: '0.25' }), F.text('note', 'Note')],
     cols: ['work_date', 'employee_id', 'task_id', 'hours', 'note'],
   },
@@ -267,12 +270,12 @@ const ENTITIES = {
 
   payslip: {
     title: 'Payslips', single: 'Payslip', readonly: true,
-    fields: [F.ref('employee_id', 'Employee', 'employee'), F.date('period_start', 'From'), F.date('period_end', 'To'),
+    fields: [F.ref('employee_id', 'Employee', 'staff'), F.date('period_start', 'From'), F.date('period_end', 'To'),
              F.num('hours', 'Hours'), F.money('gross', 'Gross'), F.money('deductions', 'Deductions'), F.money('net', 'Net pay')],
     cols: ['employee_id', 'period_start', 'period_end', 'hours', 'gross', 'deductions', 'net'],
     toolbar: [{
       label: 'Generate payslip', fn: 'fn_generate_payslip', done: 'Payslip generated',
-      fields: [F.ref('employee_id', 'Employee', 'employee', { req: 1 }), F.date('period_start', 'From', { req: 1, def: () => monthStartISO() }),
+      fields: [F.ref('employee_id', 'Employee', 'staff', { req: 1 }), F.date('period_start', 'From', { req: 1, def: () => monthStartISO() }),
                F.date('period_end', 'To', { req: 1 }), F.num('deduction_pct', 'Deductions %', { step: '0.01', def: 0 })],
     }],
   },
@@ -332,6 +335,32 @@ ENTITIES.reorder = {
   }],
 };
 
+// ---------------- Administration (admin only)
+ENTITIES.app_user = {
+  title: 'Users', readonly: true,
+  fields: [F.text('username', 'Username'), F.text('full_name', 'Name'), F.text('role', 'Role', { badge: 1 }),
+           F.bool('active', 'Active'), { k: 'created_at', l: 'Created', t: 'datetime' }],
+  cols: ['username', 'full_name', 'role', 'active', 'created_at'],
+  note: 'Roles: admin (everything), sales, store, accounts, hr, cashier (POS only), viewer (read-only).',
+  toolbar: [
+    { label: 'New user', fn: 'fn_create_user', done: 'User created',
+      fields: [F.text('username', 'Username (3+ letters, lower case)', { req: 1 }), F.text('full_name', 'Full name'),
+               F.sel('role', 'Role', ['admin', 'sales', 'store', 'accounts', 'hr', 'cashier', 'viewer'], { req: 1 }),
+               F.pass('password', 'Password (8+ characters)', { req: 1 })] },
+    { label: 'Reset password', fn: 'fn_set_password', done: 'Password reset',
+      fields: [F.ref('id', 'User', 'app_user', { req: 1 }), F.pass('password', 'New password (8+ characters)', { req: 1 })] },
+    { label: 'Activate / deactivate', fn: 'fn_set_user_active', done: 'User updated',
+      fields: [F.ref('id', 'User', 'app_user', { req: 1 }), F.bool('active', 'Active')] },
+  ],
+};
+
+ENTITIES.audit_log = {
+  title: 'Audit log', readonly: true,
+  fields: [{ k: 'at', l: 'When', t: 'datetime' }, F.text('username', 'User'), F.text('action', 'Action', { badge: 1 }), F.text('target', 'What')],
+  cols: ['at', 'username', 'action', 'target'],
+  note: 'Every change made through the system, newest first (last 1000).',
+};
+
 // Sidebar structure. A string is an entity key; special pages are handled in app.js.
 const MENU = [
   { group: 'Overview', items: [['dashboard', 'Dashboard']] },
@@ -343,5 +372,6 @@ const MENU = [
   { group: 'Projects', items: [['project', 'Projects'], ['timesheet', 'Timesheets']] },
   { group: 'Human Resources', items: [['employee', 'Employees'], ['payslip', 'Payslips']] },
   { group: 'Reports', items: [['costing', 'Costing & margin'], ['ageing', 'Receivables ageing']] },
+  { group: 'Administration', items: [['app_user', 'Users'], ['audit_log', 'Audit log']] },
   { group: 'Point of Sale', items: [['pos', 'POS terminal'], ['pos_sale', 'POS sales'], ['cash_register', 'Cash registers']] },
 ];

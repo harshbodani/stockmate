@@ -52,11 +52,13 @@ public final class Api implements HttpHandler {
         rw("employee"); ro("payslip", "payslip");
         rw("cash_register"); ro("pos_sale", "pos_sale"); ro("pos_sale_line", "pos_sale_line");
         ro("costing", "v_costing"); ro("ageing", "v_ageing"); ro("reorder", "v_reorder");
+        ro("staff", "v_staff"); ro("app_user", "v_app_user"); ro("audit_log", "audit_log");
     }
 
     /** Functions in db/functions.sql that the browser is allowed to call. */
     private static final Set<String> RPC = Set.of(
             "fn_adjust_stock", "fn_transfer_stock", "fn_reorder_create_pos", "fn_crm_convert",
+            "fn_create_user", "fn_set_password", "fn_set_user_active",
             "fn_so_confirm", "fn_so_deliver", "fn_so_cancel",
             "fn_po_confirm", "fn_po_receive", "fn_po_cancel",
             "fn_create_invoice",
@@ -71,19 +73,14 @@ public final class Api implements HttpHandler {
     private static final int MAX_BODY = 1_000_000;
 
     private final Database db;
+    private final Auth auth;
     private final Path webRoot;
     private final Map<String, Set<String>> columnCache = new ConcurrentHashMap<>();
 
     public Api(Database db, Path webRoot) {
         this.db = db;
+        this.auth = new Auth(db);
         this.webRoot = webRoot;
-    }
-
-    /** A problem with the request itself (not a server fault). */
-    private static final class HttpError extends Exception {
-        private static final long serialVersionUID = 1L;
-        final int status;
-        HttpError(int status, String message) { super(message); this.status = status; }
     }
 
     @Override
@@ -91,7 +88,7 @@ public final class Api implements HttpHandler {
         try {
             String path = ex.getRequestURI().getPath();
             if (path.equals("/api") || path.startsWith("/api/")) {
-                json(ex, 200, route(ex, path.length() > 5 ? path.substring(5) : ""));
+                json(ex, 200, dispatch(ex, path.length() > 5 ? path.substring(5) : ""));
             } else {
                 serveStatic(ex, path);
             }
@@ -111,17 +108,64 @@ public final class Api implements HttpHandler {
         }
     }
 
+    // ------------------------------------------------------------------ sign-in, permissions, audit
+
+    private String dispatch(HttpExchange ex, String rest) throws Exception {
+        String method = ex.getRequestMethod();
+        if (rest.equals("login") && method.equals("POST")) return auth.login(ex, requireBody(ex));
+        if (rest.equals("logout") && method.equals("POST")) return auth.logout(ex);
+
+        Auth.User user = auth.require(ex);          // everything below needs a signed-in user
+        if (rest.equals("me") && method.equals("GET")) return me(user);
+        if (rest.equals("password") && method.equals("POST")) {
+            return db.scalar("SELECT fn_change_password(?, ?::jsonb)::text", user.username(), requireBody(ex));
+        }
+        String result = route(ex, rest, user);
+        if (!method.equals("GET")) audit(user, method, rest);
+        return result;
+    }
+
+    /** Who is signed in and what they may do; the frontend uses this to hide buttons they cannot use. */
+    private String me(Auth.User u) throws SQLException {
+        String base = db.scalar("SELECT to_jsonb(x)::text FROM (SELECT username, full_name, role FROM app_user WHERE username = ?) x", u.username());
+        List<String> read = ENTITIES.keySet().stream().filter(k -> Permissions.canRead(u.role(), k)).toList();
+        List<String> write = ENTITIES.entrySet().stream()
+                .filter(e -> e.getValue().write() != null && Permissions.canWrite(u.role(), e.getKey())).map(Map.Entry::getKey).toList();
+        List<String> rpc = RPC.stream().filter(f -> Permissions.canRpc(u.role(), f)).sorted().toList();
+        return base.substring(0, base.length() - 1) + ",\"can_read\":" + array(read) + ",\"can_write\":" + array(write)
+                + ",\"can_rpc\":" + array(rpc) + ",\"can_dashboard\":" + Permissions.canDashboard(u.role()) + "}";
+    }
+
+    private static String array(List<String> items) {
+        StringBuilder b = new StringBuilder("[");
+        for (String s : items) b.append(b.length() > 1 ? "," : "").append(quote(s));
+        return b.append(']').toString();
+    }
+
+    /** Who changed what. A failure to log must never block the work itself. */
+    private void audit(Auth.User u, String method, String rest) {
+        try {
+            String action = rest.startsWith("rpc/") ? "ACTION" : method;
+            String target = rest.startsWith("rpc/") ? rest.substring(4) : rest;
+            db.update("INSERT INTO audit_log (username, action, target) VALUES (?, ?, ?)", u.username(), action, target);
+        } catch (SQLException e) {
+            System.err.println("audit log failed: " + e.getMessage());
+        }
+    }
+
     // ------------------------------------------------------------------ routing
 
-    private String route(HttpExchange ex, String rest) throws Exception {
+    private String route(HttpExchange ex, String rest, Auth.User user) throws Exception {
         String method = ex.getRequestMethod();
         String[] seg = rest.isEmpty() ? new String[0] : rest.split("/");
 
         if (seg.length == 1 && seg[0].equals("dashboard") && method.equals("GET")) {
+            if (!Permissions.canDashboard(user.role())) throw new HttpError(403, "Your role is not allowed to view the dashboard");
             return db.scalar("SELECT fn_dashboard()::text");
         }
         if (seg.length == 2 && seg[0].equals("rpc") && method.equals("POST")) {
             if (!RPC.contains(seg[1])) throw new HttpError(404, "Unknown action");
+            if (!Permissions.canRpc(user.role(), seg[1])) throw new HttpError(403, "Your role is not allowed to do this");
             String body = readBody(ex);
             return db.scalar("SELECT " + seg[1] + "(?::jsonb)::text", body.isBlank() ? "{}" : body);
         }
@@ -130,6 +174,8 @@ public final class Api implements HttpHandler {
         Entity e = ENTITIES.get(seg[0]);
         if (e == null) throw new HttpError(404, "Unknown resource: " + seg[0]);
         String id = seg.length == 2 ? requireId(seg[1]) : null;
+        boolean allowed = method.equals("GET") ? Permissions.canRead(user.role(), seg[0]) : Permissions.canWrite(user.role(), seg[0]);
+        if (!allowed) throw new HttpError(403, "Your role is not allowed to " + (method.equals("GET") ? "view this" : "change this"));
 
         switch (method) {
             case "GET":
@@ -198,6 +244,10 @@ public final class Api implements HttpHandler {
     private static String readBody(HttpExchange ex) throws IOException, HttpError {
         byte[] b = ex.getRequestBody().readNBytes(MAX_BODY + 1);
         if (b.length > MAX_BODY) throw new HttpError(413, "Request too large");
+        String type = ex.getRequestHeaders().getFirst("Content-Type");
+        if (b.length > 0 && (type == null || !type.toLowerCase().startsWith("application/json"))) {
+            throw new HttpError(415, "Send JSON (Content-Type: application/json)");
+        }
         return new String(b, StandardCharsets.UTF_8);
     }
 
