@@ -169,3 +169,18 @@ body.locked .shell { display: none; }
 .userbox { display: flex; align-items: center; gap: 8px; font-size: .9rem; }
 #userName { color: var(--muted); }
 @media (max-width: 860px) { #userName, #pwBtn { display: none; } }
+
+/* voice assistant */
+.voice { position: fixed; right: 16px; bottom: 16px; width: min(380px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.25); padding: 14px; z-index: 40; display: grid; gap: 8px; }
+.voice[hidden] { display: none; }
+.v-head { display: flex; align-items: center; }
+.v-log { max-height: 240px; overflow-y: auto; display: grid; gap: 6px; align-content: start; }
+.v-msg { padding: 6px 10px; border-radius: 10px; max-width: 90%; font-size: .92rem; }
+.v-msg.me { background: var(--brand-soft); justify-self: end; }
+.v-msg.bot { background: var(--bg); border: 1px solid var(--line); }
+.v-status { margin: 0; font-size: .82rem; min-height: 1.2em; }
+.v-row, .v-form { display: flex; gap: 6px; } .v-form { flex: 1; }
+.v-note { margin: 0; font-size: .75rem; }
+#voiceBtn.listening { border-color: var(--danger); color: var(--danger); }
+#voiceBtn[hidden] { display: none; }
+@media (max-width: 860px) { .userbox #userName { display: none; } }

@@ -47,7 +47,7 @@ Projects, tasks and timesheets can be edited by sales, store, accounts and hr. P
 10 wrong passwords from one address in 10 minutes blocks further attempts for a while. Every change is written to the audit log.
 The rules live in one file: `backend/src/main/java/com/stockmate/Permissions.java`.
 
-Environment variables: `PORT` (8080), `DB_URL`, `DB_USER` (postgres), `DB_PASS`, `FRONTEND_DIR`.
+Environment variables: `PORT` (8080), `DB_URL`, `DB_USER` (postgres), `DB_PASS`, `FRONTEND_DIR`; optional `OPENJARVIS_URL`, `OPENJARVIS_API_KEY`, `OPENJARVIS_MODEL` (see *Voice assistant*).
 
 ## How it is organised
 
@@ -102,6 +102,27 @@ The frontend is driven by `config.js`, a description of each screen, so adding a
 
 > **Check before real use:** the GSTIN, bank details, HSN codes and 18 % GST rate in the demo data are **samples**, not real values.
 > Confirm HSN codes, rates and invoice format with your accountant. This project does not file GST returns or generate e-invoices / e-way bills.
+
+### Voice assistant (wake word + OpenJarvis)
+
+Click **🎤 Assistant** in the top bar. Ask by typing, press 🎤 to speak one question, or switch on
+*Listen for the wake phrase "Hey StockMate"* (off by default) and just say, for example, *"Hey StockMate, how much stock of cartridges?"*
+or *"Hey StockMate"* … *"any overdue invoices?"*. Answers are shown and read aloud.
+
+```
+browser (wake phrase + speech in/out)  →  POST /api/assistant  →  built-in read-only answers (stock, low stock, money owed,
+                                                                  overdue, expiring lots, today's sales, open orders, QC)
+                                                              →  anything else → OpenJarvis (optional)
+```
+
+- **Where it lives:** the microphone and wake phrase are in the browser (`frontend/js/voice.js`) because that is where the microphone is.
+  The server (`Assistant.java`) answers using the signed-in user's role, so a cashier cannot hear finance figures. It only reads; it never changes data.
+- **OpenJarvis (optional):** run an [OpenJarvis](https://github.com/open-jarvis/OpenJarvis) server (`jarvis serve`, an OpenAI-compatible API) and start StockMate with
+  `OPENJARVIS_URL=http://localhost:<port>` (plus `OPENJARVIS_API_KEY` / `OPENJARVIS_MODEL` if your setup needs them). Questions the built-in answers do not
+  cover are sent to `/v1/chat/completions` together with the dashboard figures that user may see. OpenJarvis gets no database access. Without it, the built-in answers still work.
+- **Wake phrase and privacy:** recognition uses the browser's speech service (Chrome or Edge), which sends microphone audio to the browser vendor while the switch is on.
+  Nothing is sent to StockMate until the wake phrase is heard. For fully offline wake-word detection a dedicated engine (e.g. openWakeWord or Porcupine) would replace this part.
+- **Status:** tested with simulated speech events and a stand-in OpenJarvis server; not yet tried against a real OpenJarvis install or a real microphone.
 
 Dashboard: stock value, low-stock count, money to collect/pay, today's POS sales, open orders, 7-day sales chart, reorder list, recent movements.
 

@@ -405,6 +405,7 @@ async function startApp() {
   document.body.classList.remove('locked');
   $('#userName').textContent = `${ME.full_name || ME.username} · ${ME.role}`;
   buildNav();
+  initVoice();
   if (!ME.can_dashboard && (location.hash === '' || location.hash === '#/dashboard')) location.hash = '#/pos';
   render();
 }
@@ -424,7 +425,7 @@ async function boot() {
   });
   $('#logoutBtn').addEventListener('click', async () => {
     try { await api('POST', '/logout', {}); } catch (e) { /* already signed out */ }
-    ME = null; invalidateRefs(); $('#view').replaceChildren(); location.hash = '#/dashboard'; showLogin();
+    stopVoice(); ME = null; invalidateRefs(); $('#view').replaceChildren(); location.hash = '#/dashboard'; showLogin();
   });
   $('#pwBtn').addEventListener('click', () => openForm({
     title: 'Change password', submitLabel: 'Change password',

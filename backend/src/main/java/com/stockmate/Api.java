@@ -79,12 +79,14 @@ public final class Api implements HttpHandler {
 
     private final Database db;
     private final Auth auth;
+    private final Assistant assistant;
     private final Path webRoot;
     private final Map<String, Set<String>> columnCache = new ConcurrentHashMap<>();
 
     public Api(Database db, Path webRoot) {
         this.db = db;
         this.auth = new Auth(db);
+        this.assistant = new Assistant(db);
         this.webRoot = webRoot;
     }
 
@@ -140,7 +142,8 @@ public final class Api implements HttpHandler {
                 .filter(e -> e.getValue().write() != null && Permissions.canWrite(u.role(), e.getKey())).map(Map.Entry::getKey).toList();
         List<String> rpc = RPC.stream().filter(f -> Permissions.canRpc(u.role(), f)).sorted().toList();
         return base.substring(0, base.length() - 1) + ",\"can_read\":" + array(read) + ",\"can_write\":" + array(write)
-                + ",\"can_rpc\":" + array(rpc) + ",\"can_dashboard\":" + Permissions.canDashboard(u.role()) + "}";
+                + ",\"can_rpc\":" + array(rpc) + ",\"can_dashboard\":" + Permissions.canDashboard(u.role())
+                + ",\"openjarvis\":" + assistant.openJarvisConfigured() + "}";
     }
 
     private static String array(List<String> items) {
@@ -194,6 +197,10 @@ public final class Api implements HttpHandler {
         if (seg.length == 1 && seg[0].equals("dashboard") && method.equals("GET")) {
             if (!Permissions.canDashboard(user.role())) throw new HttpError(403, "Your role is not allowed to view the dashboard");
             return db.scalar("SELECT fn_dashboard()::text");
+        }
+        if (seg.length == 1 && seg[0].equals("assistant") && method.equals("POST")) {
+            Object text = Json.obj(Json.parse(requireBody(ex))).get("text");
+            return assistant.answer(user, text == null ? "" : text.toString());
         }
         if (seg.length == 2 && seg[0].equals("rpc") && method.equals("POST")) {
             if (!RPC.contains(seg[1])) throw new HttpError(404, "Unknown action");
