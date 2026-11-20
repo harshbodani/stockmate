@@ -220,13 +220,19 @@ async function deleteRecord(key, row, after) {
 }
 async function runAction(a, row) {
   if (a.confirm && !confirm(a.confirm)) return;
-  try {
-    const res = await api('POST', '/rpc/' + a.fn, a.body ? a.body(row) : { id: row.id });
+  const send = async extra => {
+    const res = await api('POST', '/rpc/' + a.fn, { ...(a.body ? a.body(row) : { id: row.id }), ...extra });
     invalidateRefs();
     toast(a.done || 'Done');
-    if (a.link && res && res.invoice_id) location.hash = `#/${a.link}/${res.invoice_id}`; else render();
-  } catch (e) { toast(e.message, 'err'); }
+    const target = res && (res[a.linkKey || 'invoice_id']);
+    if (a.link && target) location.hash = `#/${a.link}/${target}`; else render();
+  };
+  if (a.form) { openForm({ title: a.label, fields: a.form, submitLabel: a.label, onSubmit: d => send(d) }); return; }
+  try { await send({}); } catch (e) { toast(e.message, 'err'); }
 }
+
+const pdfLink = (type, id, cls = 'btn small ghost') =>
+  h('a', { class: cls, href: `/api/pdf/${type}/${id}`, target: '_blank', rel: 'noopener' }, 'PDF');
 function runToolbar(t) {
   openForm({
     title: t.label, fields: t.fields, submitLabel: t.label,
@@ -269,7 +275,8 @@ async function listPage(key) {
   const open = r => { location.hash = `#/${key}/${r.id}`; };
   const tbl = table(E, rows, {
     onRow: !hasId ? null : E.detail ? open : (canMake ? r => { if (canEdit(r)) editRecord(key, r); } : null),
-    rowButtons: canMake && hasId ? r => [
+    rowButtons: (canMake || E.pdf) && hasId ? r => [
+      E.pdf ? pdfLink(E.pdf, r.id) : null,
       canEdit(r) ? iconBtn('Edit', () => editRecord(key, r)) : null,
       canEdit(r) ? iconBtn('Delete', () => deleteRecord(key, r), 'danger') : null,
     ] : null,
@@ -284,12 +291,10 @@ async function listPage(key) {
 // ------------------------------------------------------------------ detail screen (header + child lines)
 async function detailPage(key, id) {
   const E = ENTITIES[key];
-  const C = ENTITIES[E.detail.child];
-  await ensureRefs(refsFor(E, C));
-  const [row, kids] = await Promise.all([api('GET', `/${key}/${id}`), api('GET', `/${E.detail.child}?${E.detail.fk}=${id}`)]);
-  const D = E.detail;
+  const Ds = Array.isArray(E.detail) ? E.detail : [E.detail];
+  await ensureRefs(refsFor(E, ...Ds.map(D => ENTITIES[D.child])));
+  const [row, ...kidSets] = await Promise.all([api('GET', `/${key}/${id}`), ...Ds.map(D => api('GET', `/${D.child}?${D.fk}=${id}`))]);
   const mayEdit = !E.readonly && canWrite(key) && (!E.editable || E.editable(row));
-  const kidsEditable = !D.readonly && canWrite(D.child) && (!D.editable || D.editable(row));
   const title = E.fields.find(f => f.k === 'number') ? row.number : (LABEL[key] ? LABEL[key](row) : E.single + ' #' + row.id);
 
   const actions = (E.actions || []).filter(a => canRpc(a.fn) && (!a.show || a.show(row)))
@@ -297,34 +302,56 @@ async function detailPage(key, id) {
 
   const head = h('div', { class: 'detail-head' },
     h('div', {}, h('a', { href: `#/${key}`, class: 'back' }, '← ' + E.title), h('h2', {}, title)),
-    h('div', { class: 'row-gap' }, mayEdit ? iconBtn('Edit', () => editRecord(key, row)) : null, actions));
+    h('div', { class: 'row-gap' }, E.pdf ? pdfLink(E.pdf, row.id, 'btn') : null, mayEdit ? iconBtn('Edit', () => editRecord(key, row)) : null, actions));
 
   const props = h('dl', { class: 'props' },
-    E.fields.map(f => [h('dt', {}, f.l), h('dd', {}, cell(f, row) || '—')]));
+    E.fields.filter(f => !(f.t === 'ref' && row[f.k] == null)).map(f => [h('dt', {}, f.l), h('dd', {}, cell(f, row) || '—')]));
 
-  const childTable = table(C, kids, {
-    rowButtons: kidsEditable ? r => [
-      D.noEdit ? null : iconBtn('Edit', () => openForm({
-        title: 'Edit ' + C.single.toLowerCase(), fields: C.fields, values: r,
-        onSubmit: async d => { await api('PUT', `/${D.child}/${r.id}`, d); toast('Saved'); render(); },
-      })),
-      D.noEdit ? null : iconBtn('Delete', () => deleteRecord(D.child, r), 'danger'),
-    ] : null,
+  const sections = Ds.map((D, i) => {
+    const C = ENTITIES[D.child];
+    const kidsEditable = !D.readonly && canWrite(D.child) && (!D.editable || D.editable(row));
+    const childTable = table(C, kidSets[i], {
+      rowButtons: kidsEditable ? r => [
+        D.noEdit ? null : iconBtn('Edit', () => openForm({
+          title: 'Edit ' + C.single.toLowerCase(), fields: C.fields, values: r,
+          onSubmit: async d => { await api('PUT', `/${D.child}/${r.id}`, d); toast('Saved'); render(); },
+        })),
+        D.noEdit ? null : iconBtn('Delete', () => deleteRecord(D.child, r), 'danger'),
+      ] : null,
+    });
+    // payments default to the outstanding balance; every other child just opens the generic form
+    const addHandler = D.child === 'payment'
+      ? () => openForm({
+        title: 'Register payment', fields: C.fields, values: { amount: row.balance }, submitLabel: 'Register payment',
+        onSubmit: async d => { await api('POST', '/payment', { ...d, invoice_id: Number(id) }); toast('Payment registered'); render(); },
+      })
+      : () => newRecord(D.child, { [D.fk]: Number(id) });
+    const addBtn = kidsEditable ? h('button', { class: 'btn primary', onclick: addHandler }, '+ Add ' + C.single.toLowerCase()) : null;
+    return [h('div', { class: 'bar' }, h('h3', {}, D.title || C.title), h('span', { class: 'grow' }), addBtn), childTable];
   });
 
-  const total = (key === 'sales_order' || key === 'purchase_order') ? h('p', { class: 'total' }, 'Total ', h('strong', {}, fmtMoney(row.total))) : null;
-  // payments default to the outstanding balance; every other child just opens the generic form
-  const addHandler = key === 'invoice'
-    ? () => openForm({
-      title: 'Register payment', fields: C.fields, values: { amount: row.balance }, submitLabel: 'Register payment',
-      onSubmit: async d => { await api('POST', '/payment', { ...d, invoice_id: Number(id) }); toast('Payment registered'); render(); },
-    })
-    : () => newRecord(D.child, { [D.fk]: Number(id) });
-  const addBtn = kidsEditable ? h('button', { class: 'btn primary', onclick: addHandler }, '+ Add ' + C.single.toLowerCase()) : null;
+  // order-like documents show the GST build-up under the lines
+  const total = ['sales_order', 'purchase_order', 'quotation'].includes(key)
+    ? h('div', { class: 'total' },
+      h('div', {}, 'Before GST ', h('strong', {}, fmtMoney(row.total))),
+      h('div', {}, 'GST ', h('strong', {}, fmtMoney(row.tax))),
+      h('div', {}, 'Total ', h('strong', {}, fmtMoney(row.grand_total)))) : null;
 
-  return h('div', {}, head, h('div', { class: 'card' }, props),
-    h('div', { class: 'bar' }, h('h3', {}, D.title || C.title), h('span', { class: 'grow' }), addBtn),
-    childTable, total);
+  return h('div', {}, head, h('div', { class: 'card' }, props), sections, total);
+}
+
+// ------------------------------------------------------------------ company settings (a single record)
+async function companyPage() {
+  const E = ENTITIES.company;
+  const rows = await api('GET', '/company');
+  const row = rows[0];
+  const props = h('dl', { class: 'props' }, E.fields.map(f => [h('dt', {}, f.l), h('dd', {}, cell(f, row) || '—')]));
+  const edit = canWrite('company') ? h('button', { class: 'btn primary', onclick: () => openForm({
+    title: 'Company settings', fields: E.fields, values: row,
+    onSubmit: async d => { await api('PUT', '/company/1', d); toast('Saved'); render(); },
+  }) }, 'Edit') : null;
+  return h('div', {}, h('p', { class: 'muted' }, 'These details are printed on invoices and quotations. The state code decides whether a sale is charged CGST + SGST (same state) or IGST (other state).'),
+    h('div', { class: 'bar' }, h('span', { class: 'grow' }), edit), h('div', { class: 'card' }, props));
 }
 
 // ------------------------------------------------------------------ router
@@ -344,6 +371,7 @@ async function render() {
     let node;
     if (key === 'dashboard') node = ME.can_dashboard ? await dashboardPage() : h('div', { class: 'card' }, 'Your role does not have access to the dashboard.');
     else if (key === 'pos') node = canRpc('fn_pos_checkout') ? await posPage() : h('div', { class: 'card' }, 'Your role does not have access to the POS terminal.');
+    else if (key === 'company' && canRead(key)) node = await companyPage();
     else if (ENTITIES[key] && !canRead(key)) node = h('div', { class: 'card' }, 'Your role does not have access to this page.');
     else if (ENTITIES[key] && id && ENTITIES[key].detail) node = await detailPage(key, id);
     else if (ENTITIES[key]) node = await listPage(key);

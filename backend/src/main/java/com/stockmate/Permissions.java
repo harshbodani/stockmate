@@ -12,6 +12,8 @@ import java.util.Set;
  *   hr       employees and payslips
  *   cashier  POS terminal only
  *   viewer   read-only
+ * Company settings (GSTIN, address) can only be changed by an admin.
+ * Sales also see QC and lots (read); store also see quotations (read).
  * Projects, tasks and timesheets can be edited by everyone except cashier and viewer.
  */
 final class Permissions {
@@ -25,13 +27,13 @@ final class Permissions {
 
     private static final Map<String, Rules> ROLES = Map.of(
             "sales", new Rules(
-                    Set.of("partner", "crm_lead", "crm_activity", "sales_order", "sales_order_line"),
-                    Set.of("fn_crm_convert", "fn_so_confirm", "fn_so_cancel", "fn_pos_checkout")),
+                    Set.of("partner", "crm_lead", "crm_activity", "sales_order", "sales_order_line", "quotation", "quotation_line"),
+                    Set.of("fn_qt_send", "fn_qt_accept", "fn_qt_reject", "fn_qt_reopen", "fn_qt_convert", "fn_crm_convert", "fn_so_confirm", "fn_so_cancel", "fn_pos_checkout")),
             "store", new Rules(
                     Set.of("product", "warehouse", "purchase_order", "purchase_order_line", "bom", "bom_line",
-                            "work_center", "production_order", "work_order"),
+                            "work_center", "production_order", "work_order", "qc_inspection", "qc_result"),
                     Set.of("fn_adjust_stock", "fn_transfer_stock", "fn_reorder_create_pos", "fn_po_confirm", "fn_po_receive",
-                            "fn_po_cancel", "fn_mo_start", "fn_mo_complete", "fn_mo_cancel", "fn_so_deliver", "fn_pos_checkout")),
+                            "fn_po_cancel", "fn_mo_start", "fn_mo_complete", "fn_mo_cancel", "fn_qc_complete", "fn_so_deliver", "fn_pos_checkout")),
             "accounts", new Rules(Set.of("payment", "partner"), Set.of("fn_create_invoice")),
             "hr", new Rules(Set.of("employee"), Set.of("fn_generate_payslip")),
             "cashier", new Rules(Set.of(), Set.of("fn_pos_checkout")),

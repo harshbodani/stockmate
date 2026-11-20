@@ -42,11 +42,15 @@ public final class Api implements HttpHandler {
     private static void ro(String name, String view) { ENTITIES.put(name, new Entity(view, null)); }
 
     static {
-        rw("partner"); rw("warehouse"); rw("product", "v_product"); ro("stock", "v_stock"); ro("stock_move", "stock_move");
+        rw("partner"); rw("warehouse"); rw("product", "v_product"); ro("stock", "v_stock"); ro("stock_move", "v_stock_move");
+        ro("lot", "v_lot"); ro("lot_trace", "v_lot_trace");
         rw("crm_lead"); rw("crm_activity");
         rw("sales_order", "v_sales_order"); rw("sales_order_line");
+        rw("quotation", "v_quotation"); rw("quotation_line");
+        rw("qc_inspection", "v_qc_inspection"); rw("qc_result");
+        rw("company");
         rw("purchase_order", "v_purchase_order"); rw("purchase_order_line");
-        ro("invoice", "v_invoice"); rw("payment");
+        ro("invoice", "v_invoice"); ro("invoice_line", "invoice_line"); rw("payment");
         rw("bom"); rw("bom_line"); rw("work_center"); rw("production_order", "v_production_order"); rw("work_order");
         rw("project", "v_project"); rw("task"); rw("timesheet", "v_timesheet");
         rw("employee"); ro("payslip", "payslip");
@@ -62,6 +66,7 @@ public final class Api implements HttpHandler {
             "fn_so_confirm", "fn_so_deliver", "fn_so_cancel",
             "fn_po_confirm", "fn_po_receive", "fn_po_cancel",
             "fn_create_invoice",
+            "fn_qt_send", "fn_qt_accept", "fn_qt_reject", "fn_qt_reopen", "fn_qt_convert", "fn_qc_complete",
             "fn_mo_start", "fn_mo_complete", "fn_mo_cancel",
             "fn_generate_payslip", "fn_pos_checkout");
 
@@ -87,7 +92,9 @@ public final class Api implements HttpHandler {
     public void handle(HttpExchange ex) throws IOException {
         try {
             String path = ex.getRequestURI().getPath();
-            if (path.equals("/api") || path.startsWith("/api/")) {
+            if (path.startsWith("/api/pdf/")) {
+                pdf(ex, path.substring(9));
+            } else if (path.equals("/api") || path.startsWith("/api/")) {
                 json(ex, 200, dispatch(ex, path.length() > 5 ? path.substring(5) : ""));
             } else {
                 serveStatic(ex, path);
@@ -151,6 +158,31 @@ public final class Api implements HttpHandler {
         } catch (SQLException e) {
             System.err.println("audit log failed: " + e.getMessage());
         }
+    }
+
+    // ------------------------------------------------------------------ PDF documents
+
+    /** GET /api/pdf/{invoice|quotation|qc|payslip}/{id}: whoever may read the record may print it. */
+    private void pdf(HttpExchange ex, String rest) throws Exception {
+        if (!ex.getRequestMethod().equals("GET")) throw new HttpError(405, "Method not allowed");
+        Auth.User user = auth.require(ex);
+        String[] seg = rest.split("/");
+        if (seg.length != 2) throw new HttpError(404, "Not found");
+        String[][] kinds = {{"invoice", "invoice", "fn_doc_invoice"}, {"quotation", "quotation", "fn_doc_quotation"},
+            {"qc", "qc_inspection", "fn_doc_qc"}, {"payslip", "payslip", "fn_doc_payslip"}};
+        String[] kind = null;
+        for (String[] k : kinds) if (k[0].equals(seg[0])) kind = k;
+        if (kind == null) throw new HttpError(404, "Unknown document type");
+        if (!Permissions.canRead(user.role(), kind[1])) throw new HttpError(403, "Your role is not allowed to view this");
+        String id = requireId(seg[1]);
+        String doc = db.scalar("SELECT " + kind[2] + "(?::int)::text", id);
+        if (doc == null) throw new HttpError(404, "Record not found");
+        byte[] bytes = Documents.build(kind[0], doc);
+        ex.getResponseHeaders().set("Content-Type", "application/pdf");
+        ex.getResponseHeaders().set("Content-Disposition", "inline; filename=\"" + kind[0] + "-" + id + ".pdf\"");
+        ex.getResponseHeaders().set("Cache-Control", "no-store");
+        ex.sendResponseHeaders(200, bytes.length);
+        ex.getResponseBody().write(bytes);
     }
 
     // ------------------------------------------------------------------ routing

@@ -23,6 +23,9 @@ const LABEL = {
   crm_lead: r => r.title,
   staff: r => r.name,
   app_user: r => `${r.username} (${r.role})`,
+  lot: r => `${r.lot_no} · ${r.product}`,
+  quotation: r => r.number,
+  qc_inspection: r => r.number,
 };
 
 const STATUS_OPTS = {
@@ -46,8 +49,9 @@ const ENTITIES = {
   partner: {
     title: 'Partners', single: 'Partner',
     fields: [F.text('name', 'Name', { req: 1 }), F.sel('kind', 'Type', ['customer', 'vendor', 'both']),
-             F.text('email', 'Email'), F.text('phone', 'Phone'), F.area('address', 'Address')],
-    cols: ['name', 'kind', 'email', 'phone'],
+             F.text('email', 'Email'), F.text('phone', 'Phone'), F.area('address', 'Address'),
+             F.text('gstin', 'GSTIN'), F.text('state_code', 'State code (2 digits, e.g. 24 = Gujarat)')],
+    cols: ['name', 'kind', 'state_code', 'gstin', 'phone'],
   },
 
   warehouse: {
@@ -62,7 +66,9 @@ const ENTITIES = {
              F.text('category', 'Category'), F.text('unit', 'Unit'),
              F.num('micron', 'Micron rating', { step: '0.01' }), F.text('size', 'Size'), F.text('material', 'Material'),
              F.text('flow_rate', 'Flow rate'), F.area('fits_models', 'Fits / compatible with'),
-             F.money('cost', 'Cost'), F.money('price', 'Sale price'),
+             F.money('cost', 'Cost'), F.money('price', 'Sale price (before GST)'),
+             F.text('hsn_code', 'HSN code'), F.num('gst_rate', 'GST rate %', { step: '0.01', def: 18 }),
+             F.bool('tracked', 'Track by batch / lot (needed for expiry and traceability)', { def: false }),
              F.num('reorder_level', 'Reorder level'), F.num('reorder_qty', 'Usual reorder quantity (0 = automatic)'),
              F.ref('vendor_id', 'Preferred vendor', 'partner'), F.bool('active', 'Active'),
              { k: 'on_hand', l: 'On hand', t: 'number', ro: 1,
@@ -77,7 +83,8 @@ const ENTITIES = {
     toolbar: [{
       label: 'Adjust stock', fn: 'fn_adjust_stock', done: 'Stock adjusted',
       fields: [F.ref('product_id', 'Product', 'product', { req: 1 }), F.ref('warehouse_id', 'Warehouse', 'warehouse', { req: 1 }),
-               F.num('qty', 'Quantity (use a minus sign to remove stock)', { req: 1, step: 'any' })],
+               F.num('qty', 'Quantity (use a minus sign to remove stock)', { req: 1, step: 'any' }),
+               F.text('lot_no', 'Lot number (tracked products; blank = automatic)'), F.date('expiry_date', 'Expiry date (optional)', { nodef: 1 })],
     }, {
       label: 'Transfer stock', fn: 'fn_transfer_stock', done: 'Stock transferred',
       fields: [F.ref('product_id', 'Product', 'product', { req: 1 }), F.ref('from_warehouse_id', 'From warehouse', 'warehouse', { req: 1 }),
@@ -88,8 +95,26 @@ const ENTITIES = {
   stock_move: {
     title: 'Stock movements', readonly: true,
     fields: [{ k: 'created_at', l: 'When', t: 'datetime' }, F.ref('product_id', 'Product', 'product'),
-             F.ref('warehouse_id', 'Warehouse', 'warehouse'), F.num('qty', 'Qty'), F.text('reason', 'Reason', { badge: 1 })],
-    cols: ['created_at', 'product_id', 'warehouse_id', 'qty', 'reason'],
+             F.ref('warehouse_id', 'Warehouse', 'warehouse'), F.text('lot_no', 'Lot'), F.num('qty', 'Qty'), F.text('reason', 'Reason', { badge: 1 })],
+    cols: ['created_at', 'product_id', 'warehouse_id', 'lot_no', 'qty', 'reason'],
+  },
+
+  lot: {
+    title: 'Batches & lots', single: 'Lot', readonly: true,
+    fields: [F.text('lot_no', 'Lot no.'), F.text('sku', 'SKU'), F.text('product', 'Product'), F.date('received_date', 'Received'),
+             F.date('expiry_date', 'Expiry'), F.num('on_hand', 'On hand'), F.text('state', 'Status', { badge: 1 }),
+             F.ref('vendor_id', 'Vendor', 'partner'), F.text('source', 'Came from'),
+             { k: 'days_to_expiry', l: 'Days to expiry', t: 'number' }],
+    cols: ['lot_no', 'product', 'received_date', 'expiry_date', 'on_hand', 'state'],
+    note: 'Stock is used oldest-expiry first. Expiring = within 30 days. Rejected lots (failed quality check) and expired lots are never issued. Open a lot to see everything that happened to it.',
+    detail: { child: 'lot_trace', fk: 'lot_id', title: 'Where this lot came from and went', readonly: true },
+  },
+
+  lot_trace: {
+    title: 'Lot history', single: 'Event', readonly: true,
+    fields: [{ k: 'at', l: 'When', t: 'datetime' }, F.text('event', 'Event', { badge: 1 }), F.num('qty', 'Qty'),
+             F.text('party', 'Partner'), F.text('reference', 'Reference')],
+    cols: ['at', 'event', 'qty', 'party', 'reference'],
   },
 
   // ---------------- Sales & CRM
@@ -116,8 +141,9 @@ const ENTITIES = {
     title: 'Sales orders', single: 'Sales order',
     fields: [F.text('number', 'Number', { ro: 1 }), F.ref('partner_id', 'Customer', 'partner', { req: 1 }),
              F.ref('warehouse_id', 'Ship from', 'warehouse', { req: 1 }), F.date('order_date', 'Order date'),
-             F.area('notes', 'Notes'), F.text('status', 'Status', { ro: 1, badge: 1 }), F.money('total', 'Total', { ro: 1 })],
-    cols: ['number', 'partner_id', 'order_date', 'status', 'total'],
+             F.area('notes', 'Notes'), F.text('status', 'Status', { ro: 1, badge: 1 }), F.money('total', 'Total before GST', { ro: 1 }),
+             F.money('tax', 'GST', { ro: 1 }), F.money('grand_total', 'Total with GST', { ro: 1 })],
+    cols: ['number', 'partner_id', 'order_date', 'status', 'grand_total'],
     editable: r => r.status === 'draft',
     detail: { child: 'sales_order_line', fk: 'order_id', title: 'Order lines', editable: p => p.status === 'draft' },
     actions: [
@@ -141,13 +167,46 @@ const ENTITIES = {
     cols: ['product_id', 'qty', 'unit_price', 'discount_pct', 'line_total'],
   },
 
+  quotation: {
+    title: 'Quotations', single: 'Quotation', pdf: 'quotation',
+    fields: [F.text('number', 'Number', { ro: 1 }), F.ref('partner_id', 'Customer', 'partner', { req: 1 }),
+             F.ref('lead_id', 'Lead (optional)', 'crm_lead'), F.date('quote_date', 'Date'),
+             F.date('valid_until', 'Valid until', { def: () => { const d = new Date(Date.now() + 15 * 864e5); return d.toISOString().slice(0, 10); } }), F.area('notes', 'Notes'), F.area('terms', 'Terms'),
+             F.text('status', 'Status', { ro: 1, badge: 1 }), F.money('total', 'Total before GST', { ro: 1 }),
+             F.money('tax', 'GST', { ro: 1 }), F.money('grand_total', 'Total with GST', { ro: 1 }),
+             F.ref('sales_order_id', 'Sales order', 'sales_order', { ro: 1 })],
+    cols: ['number', 'partner_id', 'quote_date', 'valid_until', 'status', 'grand_total'],
+    editable: r => r.status === 'draft',
+    detail: { child: 'quotation_line', fk: 'quotation_id', title: 'Quoted items', editable: p => p.status === 'draft' },
+    actions: [
+      { label: 'Mark as sent', fn: 'fn_qt_send', show: r => r.status === 'draft', done: 'Quotation marked as sent' },
+      { label: 'Customer accepted', fn: 'fn_qt_accept', show: r => r.status === 'sent', done: 'Marked accepted' },
+      { label: 'Customer declined', fn: 'fn_qt_reject', show: r => ['sent', 'accepted'].includes(r.status), danger: 1, confirm: 'Mark this quotation as declined?', done: 'Marked declined' },
+      { label: 'Convert to sales order', fn: 'fn_qt_convert', show: r => ['sent', 'accepted'].includes(r.status) && !r.expired,
+        form: [F.ref('warehouse_id', 'Ship from', 'warehouse', { req: 1 })], done: 'Sales order created', link: 'sales_order', linkKey: 'sales_order_id' },
+      { label: 'Revise (back to draft)', fn: 'fn_qt_reopen', show: r => ['sent', 'accepted', 'rejected'].includes(r.status) || (r.status === 'sent' && r.expired),
+        confirm: 'Reopen as a draft so prices can be changed? Validity is extended by 15 days if it had run out.', done: 'Quotation reopened' },
+    ],
+  },
+
+  quotation_line: {
+    title: 'Quoted items', single: 'Item',
+    fields: [F.ref('product_id', 'Product', 'product', { req: 1 }), F.num('qty', 'Quantity', { req: 1, step: 'any' }),
+             F.money('unit_price', 'Unit price', { req: 1, fillFrom: { src: 'product_id', prop: 'price' } }),
+             F.num('discount_pct', 'Discount %', { step: '0.01' }),
+             { k: 'line_total', l: 'Amount before GST', t: 'number', ro: 1, m: 1,
+               fmt: r => ({ text: fmtMoney(r.qty * r.unit_price * (1 - (r.discount_pct || 0) / 100)) }) }],
+    cols: ['product_id', 'qty', 'unit_price', 'discount_pct', 'line_total'],
+  },
+
   // ---------------- Purchases & Stock
   purchase_order: {
     title: 'Purchase orders', single: 'Purchase order',
     fields: [F.text('number', 'Number', { ro: 1 }), F.ref('partner_id', 'Vendor', 'partner', { req: 1 }),
              F.ref('warehouse_id', 'Deliver to', 'warehouse', { req: 1 }), F.date('order_date', 'Order date'),
-             F.area('notes', 'Notes'), F.text('status', 'Status', { ro: 1, badge: 1 }), F.money('total', 'Total', { ro: 1 })],
-    cols: ['number', 'partner_id', 'order_date', 'status', 'total'],
+             F.area('notes', 'Notes'), F.text('status', 'Status', { ro: 1, badge: 1 }), F.money('total', 'Total before GST', { ro: 1 }),
+             F.money('tax', 'GST', { ro: 1 }), F.money('grand_total', 'Total with GST', { ro: 1 })],
+    cols: ['number', 'partner_id', 'order_date', 'status', 'grand_total'],
     editable: r => r.status === 'draft',
     detail: { child: 'purchase_order_line', fk: 'order_id', title: 'Order lines', editable: p => p.status === 'draft' },
     actions: [
@@ -165,20 +224,34 @@ const ENTITIES = {
     title: 'Order lines', single: 'Line',
     fields: [F.ref('product_id', 'Product', 'product', { req: 1 }), F.num('qty', 'Quantity', { req: 1, step: 'any' }),
              F.money('unit_cost', 'Unit cost', { req: 1, fillFrom: { src: 'product_id', prop: 'cost' } }),
+             F.text('lot_no', 'Supplier lot / batch no. (optional)'), F.date('expiry_date', 'Expiry date (optional)', { nodef: 1 }),
              { k: 'line_total', l: 'Line total', t: 'number', ro: 1, m: 1, fmt: r => ({ text: fmtMoney(r.qty * r.unit_cost) }) }],
-    cols: ['product_id', 'qty', 'unit_cost', 'line_total'],
+    cols: ['product_id', 'qty', 'unit_cost', 'lot_no', 'expiry_date', 'line_total'],
   },
 
   // ---------------- Invoicing
   invoice: {
-    title: 'Invoices & payments', single: 'Invoice', readonly: true,
+    title: 'Invoices & payments', single: 'Invoice', readonly: true, pdf: 'invoice',
     fields: [F.text('number', 'Number'), F.text('kind', 'Type', { badge: 1 }), F.ref('partner_id', 'Partner', 'partner'),
-             F.date('issue_date', 'Issued'), F.date('due_date', 'Due'), F.money('total', 'Total'), F.money('paid', 'Paid'),
+             F.date('issue_date', 'Issued'), F.date('due_date', 'Due'),
+             F.text('supply_type', 'Supply', { fmt: r => ({ text: r.supply_type === 'inter' ? 'Inter-state (IGST)' : 'Within state (CGST + SGST)' }) }),
+             F.text('place_of_supply', 'Place of supply (state code)'),
+             F.money('subtotal', 'Taxable value'), F.money('cgst', 'CGST'), F.money('sgst', 'SGST'), F.money('igst', 'IGST'),
+             F.money('round_off', 'Round off'), F.money('total', 'Total'), F.money('paid', 'Paid'),
              F.money('balance', 'Balance'), F.text('status', 'Status', { badge: 1 }),
              { k: 'overdue', l: 'Overdue', t: 'bool', ro: 1 }],
     cols: ['number', 'kind', 'partner_id', 'due_date', 'total', 'paid', 'status'],
     rowClass: r => (r.overdue ? 'overdue' : ''),
-    detail: { child: 'payment', fk: 'invoice_id', title: 'Payments', editable: p => p.status !== 'paid', noEdit: true },
+    detail: [{ child: 'invoice_line', fk: 'invoice_id', title: 'Items (with GST)', readonly: true },
+             { child: 'payment', fk: 'invoice_id', title: 'Payments', editable: p => p.status !== 'paid', noEdit: true }],
+  },
+
+  invoice_line: {
+    title: 'Invoice items', single: 'Item', readonly: true,
+    fields: [F.text('description', 'Item'), F.text('hsn_code', 'HSN'), F.num('qty', 'Qty'), F.money('unit_price', 'Rate'),
+             F.num('discount_pct', 'Disc %'), F.money('taxable_value', 'Taxable'), F.num('gst_rate', 'GST %'),
+             F.money('cgst', 'CGST'), F.money('sgst', 'SGST'), F.money('igst', 'IGST'), F.money('line_total', 'Amount')],
+    cols: ['description', 'hsn_code', 'qty', 'unit_price', 'discount_pct', 'taxable_value', 'gst_rate', 'cgst', 'sgst', 'igst', 'line_total'],
   },
 
   payment: {
@@ -233,6 +306,35 @@ const ENTITIES = {
     cols: ['operation', 'work_center_id', 'hours', 'status'],
   },
 
+  // ---------------- Quality control
+  qc_inspection: {
+    title: 'Quality checks', single: 'Inspection', pdf: 'qc',
+    fields: [F.text('number', 'Number', { ro: 1 }), F.sel('kind', 'Type', ['incoming', 'in_process', 'final']),
+             F.ref('product_id', 'Product', 'product', { req: 1 }), F.ref('lot_id', 'Lot checked', 'lot'),
+             F.ref('purchase_order_id', 'Purchase order', 'purchase_order'), F.ref('production_order_id', 'Production order', 'production_order'),
+             F.date('inspected_on', 'Date'), F.ref('inspector_id', 'Inspector', 'staff'),
+             F.num('sample_size', 'Sample size', { step: 'any' }), F.num('defects', 'Defects found', { step: 'any' }),
+             F.text('status', 'Result', { ro: 1, badge: 1 }), F.text('disposition', 'Decision', { ro: 1, badge: 1 }),
+             F.text('rejection_reason', 'Reason for rejection', { ro: 1 }), F.area('notes', 'Notes'),
+             { k: 'lot_no', l: 'Lot no.', t: 'text', ro: 1 }, { k: 'tests_failed', l: 'Failed tests', t: 'number', ro: 1 }],
+    cols: ['number', 'kind', 'product_id', 'lot_no', 'inspected_on', 'tests_failed', 'status'],
+    editable: r => r.status === 'open',
+    detail: { child: 'qc_result', fk: 'inspection_id', title: 'Test readings', editable: p => p.status === 'open' },
+    note: 'Record each reading against its allowed range. One reading outside its range fails the inspection and the lot is blocked from use.',
+    actions: [{ label: 'Complete inspection', fn: 'fn_qc_complete', show: r => r.status === 'open',
+                form: [F.sel('disposition', 'If any reading failed, what happens to the material?', ['accept', 'rework', 'scrap', 'return_to_vendor'], { def: 'return_to_vendor' }),
+                       F.text('rejection_reason', 'Reason (if failed)')],
+                done: 'Inspection completed' }],
+  },
+
+  qc_result: {
+    title: 'Test readings', single: 'Reading',
+    fields: [F.text('parameter', 'Test', { req: 1 }), F.text('unit', 'Unit'), F.num('spec_min', 'Allowed minimum', { step: 'any' }),
+             F.num('spec_max', 'Allowed maximum', { step: 'any' }), F.num('measured', 'Measured value', { req: 1, step: 'any' }),
+             { k: 'passed', l: 'Result', t: 'text', ro: 1, fmt: r => ({ text: r.passed ? 'Pass' : 'FAIL', cls: r.passed ? 'gain' : 'low' }) }],
+    cols: ['parameter', 'unit', 'spec_min', 'spec_max', 'measured', 'passed'],
+  },
+
   // ---------------- Projects
   project: {
     title: 'Projects', single: 'Project',
@@ -269,7 +371,7 @@ const ENTITIES = {
   },
 
   payslip: {
-    title: 'Payslips', single: 'Payslip', readonly: true,
+    title: 'Payslips', single: 'Payslip', readonly: true, pdf: 'payslip',
     fields: [F.ref('employee_id', 'Employee', 'staff'), F.date('period_start', 'From'), F.date('period_end', 'To'),
              F.num('hours', 'Hours'), F.money('gross', 'Gross'), F.money('deductions', 'Deductions'), F.money('net', 'Net pay')],
     cols: ['employee_id', 'period_start', 'period_end', 'hours', 'gross', 'deductions', 'net'],
@@ -335,6 +437,15 @@ ENTITIES.reorder = {
   }],
 };
 
+// ---------------- Company settings (one record; shown on invoices and quotations)
+ENTITIES.company = {
+  title: 'Company settings', single: 'Company', singleton: true,
+  fields: [F.text('name', 'Company name', { req: 1 }), F.area('address', 'Address'), F.text('gstin', 'GSTIN'),
+           F.text('state_code', 'State code (2 digits)', { req: 1 }), F.text('state_name', 'State'), F.text('phone', 'Phone'),
+           F.text('email', 'Email'), F.area('bank_details', 'Bank details (printed on invoices)'), F.area('invoice_terms', 'Invoice terms')],
+  cols: ['name'],
+};
+
 // ---------------- Administration (admin only)
 ENTITIES.app_user = {
   title: 'Users', readonly: true,
@@ -364,14 +475,15 @@ ENTITIES.audit_log = {
 // Sidebar structure. A string is an entity key; special pages are handled in app.js.
 const MENU = [
   { group: 'Overview', items: [['dashboard', 'Dashboard']] },
-  { group: 'Sales & CRM', items: [['crm_lead', 'Leads'], ['sales_order', 'Sales orders'], ['partner', 'Customers & vendors']] },
-  { group: 'Purchases & Stock', items: [['purchase_order', 'Purchase orders'], ['product', 'Products'], ['stock', 'Stock'],
+  { group: 'Sales & CRM', items: [['crm_lead', 'Leads'], ['quotation', 'Quotations'], ['sales_order', 'Sales orders'], ['partner', 'Customers & vendors']] },
+  { group: 'Purchases & Stock', items: [['purchase_order', 'Purchase orders'], ['product', 'Products'], ['stock', 'Stock'], ['lot', 'Batches & lots'],
                                          ['stock_move', 'Stock movements'], ['reorder', 'Reorder suggestions'], ['warehouse', 'Warehouses']] },
+  { group: 'Quality', items: [['qc_inspection', 'Quality checks']] },
   { group: 'Invoicing', items: [['invoice', 'Invoices & payments']] },
   { group: 'Manufacturing', items: [['production_order', 'Production orders'], ['bom', 'Bills of materials'], ['work_center', 'Work centers']] },
   { group: 'Projects', items: [['project', 'Projects'], ['timesheet', 'Timesheets']] },
   { group: 'Human Resources', items: [['employee', 'Employees'], ['payslip', 'Payslips']] },
   { group: 'Reports', items: [['costing', 'Costing & margin'], ['ageing', 'Receivables ageing']] },
-  { group: 'Administration', items: [['app_user', 'Users'], ['audit_log', 'Audit log']] },
+  { group: 'Administration', items: [['company', 'Company settings'], ['app_user', 'Users'], ['audit_log', 'Audit log']] },
   { group: 'Point of Sale', items: [['pos', 'POS terminal'], ['pos_sale', 'POS sales'], ['cash_register', 'Cash registers']] },
 ];

@@ -48,6 +48,8 @@ async function dashboardPage() {
     ['Open sales orders', d.open_sales_orders, 'draft or confirmed', 'sales_order', ''],
     ['Open purchase orders', d.open_purchase_orders, 'draft or confirmed', 'purchase_order', ''],
     ['Production', d.running_production, 'planned or in progress', 'production_order', ''],
+    ['Lots expiring', d.expiring_lots, 'within 30 days or expired, still in stock', 'lot', d.expiring_lots > 0 ? 'warn' : ''],
+    ['Failed quality checks', d.qc_failed_30d, 'last 30 days', 'qc_inspection', d.qc_failed_30d > 0 ? 'warn' : ''],
     ['Open leads', d.open_leads, '', 'crm_lead', ''],
     ['Active projects', d.active_projects, `${d.employees} employees`, 'project', ''],
   ];
