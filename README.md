@@ -35,8 +35,8 @@ Demo accounts (created by `seed.sql`; **change the passwords** under Users → R
 | Username | Password | Role | Can do |
 |----------|----------|------|--------|
 | admin | admin123 | admin | everything, manage users, audit log |
-| sales | sales123 | sales | leads, customers, sales orders |
-| store | store123 | store | products, stock, purchasing, manufacturing, deliveries |
+| sales | sales123 | sales | leads, customers, quotations, sales orders |
+| store | store123 | store | products, stock and lots, purchasing, manufacturing, quality checks, deliveries |
 | accounts | accounts123 | accounts | create invoices, register payments |
 | hrdesk | hr123456 | hr | employees, payslips |
 | cashier | cashier123 | cashier | POS terminal only |
@@ -53,9 +53,9 @@ Environment variables: `PORT` (8080), `DB_URL`, `DB_USER` (postgres), `DB_PASS`,
 
 ```
 db/schema.sql      tables, constraints, views
-db/functions.sql   business logic in PL/pgSQL (stock moves, deliver/receive, invoicing, production, payroll, POS)
+db/functions.sql   business logic in PL/pgSQL (stock and lots, deliver/receive, GST invoicing, quotations, QC, production, payroll, POS, PDF data)
 db/seed.sql        demo data for a filter business and the demo logins
-backend/           Java server: Api (routes), Auth (sessions), Permissions (roles), JdbcDatabase; serves the frontend
+backend/           Java server: Api (routes), Auth (sessions), Permissions (roles), JdbcDatabase; Pdf + Documents + Json draw the PDFs; serves the frontend
 frontend/          single-page app: config.js (screen definitions), app.js (generic screens), dashboard.js, pos.js
 ```
 
@@ -67,9 +67,10 @@ The frontend is driven by `config.js`, a description of each screen, so adding a
 
 | Module | Screens | Main logic |
 |--------|---------|-----------|
-| Sales & CRM | Leads, Sales orders, Customers & vendors | Lead stages and activity history; **Convert lead → customer**; order → confirm → deliver (stock goes down) |
+| Sales & CRM | Leads, Quotations, Sales orders, Customers & vendors | Lead stages and activity history; **Convert lead → customer**; quotation → sent → accepted → **convert to order** → confirm → deliver (stock goes down) |
 | Purchases & Stock | Purchase orders, Products, Stock, Stock movements, Warehouses | Receive goods (stock goes up, cost updates); multi-warehouse quantities; every change logged in `stock_move`; low-stock alerts |
-| Invoicing & Payments | Invoices & payments | Invoice from an order; partial payments; status open → partial → paid; overdue flag; overpayment blocked |
+| Invoicing & Payments | Invoices & payments | **GST invoice** from an order (HSN, CGST+SGST or IGST, round-off, amount in words); partial payments; status open → partial → paid; overdue flag; overpayment blocked |
+| Quality | Quality checks | Inspection with test readings against min/max; any reading out of range fails it and blocks the lot |
 | Manufacturing | Production orders, Bills of materials, Work centers | Completing an order consumes BOM components and adds finished goods; work orders per operation |
 | Project Management | Projects, Tasks, Timesheets | Task status, hours logged per project, progress |
 | Human Resources | Employees, Payslips | Payslip = timesheet hours × hourly rate − deductions % |
@@ -83,6 +84,24 @@ The frontend is driven by `config.js`, a description of each screen, so adding a
 - **Reorder suggestions:** low-stock products not already on an open order; one click creates a draft purchase order per preferred vendor.
 - **Warehouse transfers:** move stock between the Main Warehouse and Production Store, logged on both sides.
 - **CSV export** on every list.
+
+### Batch / lot tracking, quotations, GST, quality control, PDF
+
+- **Lots:** mark a product *Track by batch / lot*. Goods received get a lot (supplier lot number and expiry can be typed on the purchase line),
+  finished goods get the production order number as lot. Stock leaves **earliest-expiry first, then oldest first**; rejected and expired lots are never issued.
+  *Batches & lots* shows on-hand, expiry status (ok / expiring within 30 days / expired / rejected) and, per lot, a **traceability history**
+  (where it came from, which lots it was made from or used to make, and its movements). Transfers keep the lot.
+- **Quotations:** draft → sent → accepted/declined → converted. Converting creates a draft sales order with the same lines and marks the CRM lead won.
+  Expired quotations must be revised before they can be converted. Prices are before GST; the screen shows GST and the total.
+- **GST invoices:** the company state code (Company settings) is compared with the customer's state code. Same state: CGST + SGST (half each);
+  different state: IGST. Each product has an HSN code and GST rate; each partner a GSTIN and state code. Totals are rounded to the rupee with the round-off shown.
+- **Quality control:** record an incoming, in-process or final inspection with readings. Completing it passes the lot, or (if a reading is out of range)
+  fails it with a decision (accept / rework / scrap / return to vendor) and blocks the lot.
+- **PDF export:** invoices (with HSN table and amount in words), quotations, QC reports and payslips: use the **PDF** button on the list or detail screen
+  (`GET /api/pdf/{invoice|quotation|qc|payslip}/{id}`). The PDF writer is plain Java with the standard Helvetica fonts; the rupee sign is printed as "Rs.".
+
+> **Check before real use:** the GSTIN, bank details, HSN codes and 18 % GST rate in the demo data are **samples**, not real values.
+> Confirm HSN codes, rates and invoice format with your accountant. This project does not file GST returns or generate e-invoices / e-way bills.
 
 Dashboard: stock value, low-stock count, money to collect/pay, today's POS sales, open orders, 7-day sales chart, reorder list, recent movements.
 
@@ -104,8 +123,7 @@ POST   /api/{entity}                  create                       PUT/DELETE /a
 
 ## Known limits / future work
 
-- Not done yet: batch/lot tracking, quotations (enquiry → quote → order), GST (HSN codes, CGST/SGST/IGST), quality-control records,
-  customer replacement reminders, credit notes and PDF export of invoices and payslips.
+- Not done yet: customer replacement reminders, credit notes, GST returns / e-invoice / e-way bill, serial numbers per unit, QC sampling plans, PDFs with non-Latin text.
 - Single currency (INR) and a single company.
 - Sessions are kept in server memory, so everyone is signed out when the server restarts.
 - Serve it over HTTPS (for example behind a reverse proxy) before exposing it beyond a local network.
