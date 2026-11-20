@@ -114,3 +114,6 @@ POST   /api/{entity}                  create                       PUT/DELETE /a
 
 The module list follows the common ERP structure used by open-source systems such as Odoo and MyCompany (lsFusion).
 No code from those projects is used; the schema, logic and screens in this repository were written for StockMate.
+
+next
+
