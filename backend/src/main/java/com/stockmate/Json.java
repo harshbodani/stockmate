@@ -9,16 +9,24 @@ import java.util.Map;
 final class Json {
     private final String s;
     private int i;
+    private int depth;
+    private static final int MAX_DEPTH = 40;
 
     private Json(String s) { this.s = s; }
 
     static Object parse(String text) {
-        Json j = new Json(text);
-        j.ws();
-        Object v = j.value();
-        j.ws();
-        if (j.i != text.length()) throw new IllegalArgumentException("Unexpected text after JSON value");
-        return v;
+        try {
+            Json j = new Json(text);
+            j.ws();
+            Object v = j.value();
+            j.ws();
+            if (j.i != text.length()) throw new IllegalArgumentException("Unexpected text after JSON value");
+            return v;
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new IllegalArgumentException("Invalid JSON");
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -39,25 +47,26 @@ final class Json {
     private Object value() {
         if (i >= s.length()) throw new IllegalArgumentException("Unexpected end of JSON");
         char c = s.charAt(i);
+        if ((c == '{' || c == '[') && ++depth > MAX_DEPTH) throw new IllegalArgumentException("JSON is nested too deeply");
         if (c == '{') {
             Map<String, Object> m = new LinkedHashMap<>();
             i++; ws();
-            if (s.charAt(i) == '}') { i++; return m; }
+            if (s.charAt(i) == '}') { i++; depth--; return m; }
             while (true) {
                 ws(); String k = string(); ws(); expect(':'); ws();
                 m.put(k, value()); ws();
                 if (s.charAt(i) == ',') { i++; continue; }
-                expect('}'); return m;
+                expect('}'); depth--; return m;
             }
         }
         if (c == '[') {
             List<Object> l = new ArrayList<>();
             i++; ws();
-            if (s.charAt(i) == ']') { i++; return l; }
+            if (s.charAt(i) == ']') { i++; depth--; return l; }
             while (true) {
                 ws(); l.add(value()); ws();
                 if (s.charAt(i) == ',') { i++; continue; }
-                expect(']'); return l;
+                expect(']'); depth--; return l;
             }
         }
         if (c == '"') return string();

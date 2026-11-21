@@ -127,11 +127,13 @@ INSERT INTO qc_result (inspection_id, parameter, unit, spec_min, spec_max, measu
   (2, 'Softening point', 'deg C', 95, 110, 84);
 SELECT fn_qc_complete('{"id":2,"disposition":"return_to_vendor","rejection_reason":"Softening point below spec"}');
 
--- demo logins (CHANGE THESE before using StockMate for real work)
-SELECT fn_create_user('{"username":"admin","full_name":"Administrator","role":"admin","password":"admin123"}');
-SELECT fn_create_user('{"username":"sales","full_name":"Meena Shah","role":"sales","password":"sales123"}');
-SELECT fn_create_user('{"username":"store","full_name":"Kiran Joshi","role":"store","password":"store123"}');
-SELECT fn_create_user('{"username":"accounts","full_name":"Accounts Desk","role":"accounts","password":"accounts123"}');
-SELECT fn_create_user('{"username":"hrdesk","full_name":"HR Desk","role":"hr","password":"hr123456"}');
-SELECT fn_create_user('{"username":"cashier","full_name":"Counter 1","role":"cashier","password":"cashier123"}');
-SELECT fn_create_user('{"username":"viewer","full_name":"Read-only guest","role":"viewer","password":"viewer123"}');
+-- demo logins. These are throw-away accounts: every one of them is forced to choose a new password at first sign-in.
+-- (Inserted directly because the normal password rules reject simple demo passwords.)
+INSERT INTO app_user (username, full_name, role, password_hash, must_change) VALUES
+  ('admin',    'Administrator',   'admin',    crypt('admin123',    gen_salt('bf', 10)), true),
+  ('sales',    'Meena Shah',      'sales',    crypt('sales123',    gen_salt('bf', 10)), true),
+  ('store',    'Kiran Joshi',     'store',    crypt('store123',    gen_salt('bf', 10)), true),
+  ('accounts', 'Accounts Desk',   'accounts', crypt('accounts123', gen_salt('bf', 10)), true),
+  ('hrdesk',   'HR Desk',         'hr',       crypt('hr123456',    gen_salt('bf', 10)), true),
+  ('cashier',  'Counter 1',       'cashier',  crypt('cashier123',  gen_salt('bf', 10)), true),
+  ('viewer',   'Read-only guest', 'viewer',   crypt('viewer123',   gen_salt('bf', 10)), true);

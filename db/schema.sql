@@ -535,6 +535,7 @@ CREATE TABLE app_user (
   full_name     text,
   role          text NOT NULL CHECK (role IN ('admin','sales','store','accounts','hr','cashier','viewer')),
   password_hash text NOT NULL,
+  must_change   boolean NOT NULL DEFAULT true,   -- a new or reset password must be replaced at the next sign-in
   active        boolean NOT NULL DEFAULT true,
   created_at    timestamptz NOT NULL DEFAULT now()
 );
@@ -549,7 +550,7 @@ CREATE TABLE audit_log (
 CREATE INDEX ON audit_log (at DESC);
 
 -- the password hash never leaves the database
-CREATE VIEW v_app_user AS SELECT id, username, full_name, role, active, created_at FROM app_user;
+CREATE VIEW v_app_user AS SELECT id, username, full_name, role, active, created_at FROM app_user;   -- never exposes password hashes
 -- names only, so people without HR access can still see who a task is assigned to
 CREATE VIEW v_staff AS SELECT id, name, job_title, active FROM employee;
 

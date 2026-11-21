@@ -27,6 +27,10 @@ public final class JdbcDatabase implements Database {
     private Connection open() throws SQLException {
         Connection c = DriverManager.getConnection(url, user, password);
         c.setAutoCommit(true);
+        try (java.sql.Statement st = c.createStatement()) {   // no query may run for more than 15 s
+            st.execute("SET statement_timeout = '15s'");
+            st.execute("SET idle_in_transaction_session_timeout = '30s'");
+        }
         return c;
     }
 

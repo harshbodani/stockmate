@@ -26,12 +26,28 @@ final class Assistant {
             "check", "current", "on", "hand", "please", "got", "does", "a", "an", "to", "my");
 
     private final Database db;
-    private final String ojUrl = System.getenv("OPENJARVIS_URL");
+    private final String ojUrl = safeUrl(System.getenv("OPENJARVIS_URL"));
     private final String ojKey = System.getenv("OPENJARVIS_API_KEY");
     private final String ojModel = System.getenv().getOrDefault("OPENJARVIS_MODEL", "default");
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     Assistant(Database db) { this.db = db; }
+
+    /**
+     * Business figures are sent to this URL, so it must be https, or plain http only to this machine (localhost).
+     * Anything else is ignored with a warning rather than sending data over an open network.
+     */
+    private static String safeUrl(String url) {
+        if (url == null || url.isBlank()) return null;
+        try {
+            URI u = URI.create(url.trim());
+            String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+            boolean local = host.equals("localhost") || host.equals("127.0.0.1") || host.equals("::1") || host.equals("[::1]");
+            if ("https".equals(u.getScheme()) || ("http".equals(u.getScheme()) && local)) return url.trim();
+        } catch (IllegalArgumentException ignored) { /* falls through */ }
+        System.err.println("WARNING: OPENJARVIS_URL ignored. Use https:// (or http://localhost) so business data is not sent unencrypted.");
+        return null;
+    }
 
     boolean openJarvisConfigured() { return ojUrl != null && !ojUrl.isBlank(); }
 

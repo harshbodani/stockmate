@@ -124,7 +124,7 @@ function table(E, rows, { onRow, rowButtons } = {}) {
 }
 
 // ------------------------------------------------------------------ forms (native <dialog>)
-async function openForm({ title, fields, values = {}, submitLabel = 'Save', onSubmit }) {
+async function openForm({ title, fields, values = {}, submitLabel = 'Save', onSubmit, force = false, intro = null }) {
   await ensureRefs(refsFor({ fields })); // dropdown data may have just been cleared by a save
   const dlg = h('dialog', { class: 'modal' });
   const err = h('p', { class: 'form-err', role: 'alert' });
@@ -169,9 +169,9 @@ async function openForm({ title, fields, values = {}, submitLabel = 'Save', onSu
   }
 
   const form = h('form', { novalidate: false },
-    h('h2', {}, title), rowsEl, err,
+    h('h2', {}, title), intro ? h('p', { class: 'muted' }, intro) : null, rowsEl, err,
     h('div', { class: 'modal-actions' },
-      h('button', { type: 'button', class: 'btn ghost', onclick: () => dlg.close() }, 'Cancel'),
+      force ? null : h('button', { type: 'button', class: 'btn ghost', onclick: () => dlg.close() }, 'Cancel'),
       h('button', { type: 'submit', class: 'btn primary' }, submitLabel)));
 
   form.addEventListener('submit', async e => {
@@ -190,6 +190,7 @@ async function openForm({ title, fields, values = {}, submitLabel = 'Save', onSu
   });
 
   dlg.append(form);
+  if (force) dlg.addEventListener('cancel', e => e.preventDefault());   // Escape cannot dismiss it
   dlg.addEventListener('close', () => dlg.remove());
   document.body.append(dlg);
   dlg.showModal();
@@ -399,10 +400,21 @@ function showLogin(message) {
   $('#loginUser').focus();
 }
 
+const PASSWORD_HINT = '10+ characters with a letter and a digit';
+function forcePasswordChange() {
+  openForm({
+    title: 'Choose a new password', submitLabel: 'Change password', force: true,
+    intro: 'This account is using a temporary password. Choose your own to continue (' + PASSWORD_HINT + ').',
+    fields: [F.pass('old_password', 'Temporary password', { req: 1 }), F.pass('new_password', 'New password', { req: 1 })],
+    onSubmit: async d => { await api('POST', '/password', d); toast('Password changed'); await startApp(); },
+  });
+}
+
 async function startApp() {
   ME = await api('GET', '/me');
   invalidateRefs();
   document.body.classList.remove('locked');
+  if (ME.must_change) { $('#view').replaceChildren(); $('#nav').replaceChildren(); $('#userName').textContent = ME.username; forcePasswordChange(); return; }
   $('#userName').textContent = `${ME.full_name || ME.username} · ${ME.role}`;
   buildNav();
   initVoice();
@@ -429,7 +441,7 @@ async function boot() {
   });
   $('#pwBtn').addEventListener('click', () => openForm({
     title: 'Change password', submitLabel: 'Change password',
-    fields: [F.pass('old_password', 'Current password', { req: 1 }), F.pass('new_password', 'New password (8+ characters)', { req: 1 })],
+    fields: [F.pass('old_password', 'Current password', { req: 1 }), F.pass('new_password', 'New password (' + PASSWORD_HINT + ')', { req: 1 })],
     onSubmit: async d => { await api('POST', '/password', d); toast('Password changed'); },
   }));
 

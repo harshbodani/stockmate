@@ -30,7 +30,7 @@ Project Management, Human Resources and Point of Sale** in one database, built f
 
 ## Sign-in and roles
 
-Demo accounts (created by `seed.sql`; **change the passwords** under Users → Reset password before real use):
+Demo accounts (created by `seed.sql`). **Every demo account is forced to choose a new password at its first sign-in**; delete the demo users you do not need under Administration → Users:
 
 | Username | Password | Role | Can do |
 |----------|----------|------|--------|
@@ -42,12 +42,10 @@ Demo accounts (created by `seed.sql`; **change the passwords** under Users → R
 | cashier | cashier123 | cashier | POS terminal only |
 | viewer | viewer123 | viewer | read-only |
 
-Projects, tasks and timesheets can be edited by sales, store, accounts and hr. Passwords are stored as bcrypt hashes
-(never in plain text). Sessions use an HttpOnly, SameSite=Strict cookie; a deactivated user is locked out immediately;
-10 wrong passwords from one address in 10 minutes blocks further attempts for a while. Every change is written to the audit log.
+Projects, tasks and timesheets can be edited by sales, store, accounts and hr. See *Security* below for how sign-in, sessions and the database are protected.
 The rules live in one file: `backend/src/main/java/com/stockmate/Permissions.java`.
 
-Environment variables: `PORT` (8080), `DB_URL`, `DB_USER` (postgres), `DB_PASS`, `FRONTEND_DIR`; optional `OPENJARVIS_URL`, `OPENJARVIS_API_KEY`, `OPENJARVIS_MODEL` (see *Voice assistant*).
+Environment variables: `PORT` (8080), `DB_URL`, `DB_USER` (postgres), `DB_PASS`, `FRONTEND_DIR`; `HOST` (127.0.0.1), `COOKIE_SECURE`, `TRUST_PROXY`, `ALLOWED_HOSTS`, `ALLOWED_ORIGINS` (see *Security*); optional `OPENJARVIS_URL`, `OPENJARVIS_API_KEY`, `OPENJARVIS_MODEL` (see *Voice assistant*).
 
 ## How it is organised
 
@@ -84,6 +82,39 @@ The frontend is driven by `config.js`, a description of each screen, so adding a
 - **Reorder suggestions:** low-stock products not already on an open order; one click creates a draft purchase order per preferred vendor.
 - **Warehouse transfers:** move stock between the Main Warehouse and Production Store, logged on both sides.
 - **CSV export** on every list.
+
+## Security
+
+**What is protected and how**
+
+| Area | Protection |
+|---|---|
+| Passwords | bcrypt hashes only, never returned by any screen or API. Rules: 10+ characters, a letter and a digit, not the username, not an obvious password. A new or admin-reset password must be replaced at the next sign-in (the app is unusable until then). |
+| Sign-in | Same message for wrong user or wrong password (and equal cost, so timing does not reveal valid usernames). 10 failures in 10 minutes lock the address **and** the username for a while. Guessing the "current password" when changing it is limited the same way. Every sign-in, failure and sign-out is in the audit log. |
+| Sessions | Random 256-bit token in an `HttpOnly`, `SameSite=Strict` cookie (`Secure` too when `COOKIE_SECURE=true`). Ends after 4 h idle or 12 h in total, max 5 per user. Changing or resetting a password signs that user out everywhere else; deactivating a user or changing their role applies on the very next click. |
+| Permissions | Checked on the **server** for every request (roles in `Permissions.java`), not just by hiding buttons. PDFs and the assistant follow the same rules. |
+| Cross-site attacks | Requests that change data are refused if their `Origin` or `Sec-Fetch-Site` is another site. A strict Content-Security-Policy (no inline scripts or styles, no framing), `nosniff`, `no-referrer`. All text from the database is inserted as plain text, never as HTML. PDF text is escaped. |
+| Data integrity | Quotations, orders and QC records can only be edited or deleted while in their first state (draft / planned / open), enforced by database triggers, so the API cannot be used to rewrite a confirmed document. Payments and the audit log are append-only. Company settings cannot be deleted. |
+| SQL injection | Every value is a bound parameter; table and column names come from fixed whitelists. Database error text is replaced by plain messages (no table or constraint names). |
+| Database account | `db/app_role.sql` creates a limited account: no table creation/dropping, no changes to the audit log, stock history or payments, only the password/active/must-change columns of users. Each query is stopped after 15 s. |
+| Abuse limits | Request size (1 MB), header count, request and connection timeouts, 30 assistant questions a minute per user, JSON nesting limit. |
+| Network | Listens on `127.0.0.1` only unless you set `HOST`. `ALLOWED_HOSTS` / `ALLOWED_ORIGINS` can restrict the host names. |
+| Assistant / OpenJarvis | Read-only, role-checked. `OPENJARVIS_URL` must be `https://` (or `http://localhost`); otherwise it is ignored so figures are never sent in clear text. OpenJarvis gets no database access. |
+
+**Before putting it on a real network**
+
+1. Create the limited database account: `psql -d stockmate -v pw="'a-long-random-password'" -f db/app_role.sql`, then run with `DB_USER=stockmate_app DB_PASS=...` (the server warns if it runs as `postgres`).
+2. Run it behind an HTTPS reverse proxy (nginx, Caddy, ...). This server speaks plain HTTP itself. Then set `HOST=0.0.0.0` (or the proxy's address), `COOKIE_SECURE=true`, `TRUST_PROXY=true` (so sign-in limits use the real client address; only enable it when a proxy you control sets `X-Forwarded-For`), and `ALLOWED_HOSTS=your.domain`.
+3. Make sure users have chosen their own passwords and delete unused demo accounts.
+4. Keep regular PostgreSQL backups; keep the database port closed to the internet.
+
+**Known limits (honest list)**
+
+- No two-factor sign-in; sessions are kept in the server's memory, so a restart signs everyone out.
+- Roles are per module, not per record (for example any sales user can see all quotations).
+- The JDBC pool (`JdbcDatabase`) and TLS/proxy setup could not be run in the build environment I used; everything else was tested against PostgreSQL with the limited account. Test your deployment.
+- Browser speech recognition (wake phrase) sends audio to the browser vendor while it is switched on.
+- Dependencies are the JDK plus the PostgreSQL driver (pinned to 42.7.4); run a dependency check (for example `mvn org.owasp:dependency-check-maven:check`) before release.
 
 ### Batch / lot tracking, quotations, GST, quality control, PDF
 

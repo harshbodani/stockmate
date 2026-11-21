@@ -83,9 +83,20 @@ public final class Api implements HttpHandler {
     private final Path webRoot;
     private final Map<String, Set<String>> columnCache = new ConcurrentHashMap<>();
 
+    private final boolean secure = "true".equalsIgnoreCase(Main.env("COOKIE_SECURE", "false"));
+    private final Set<String> allowedHosts = csv(Main.env("ALLOWED_HOSTS", ""));
+    private final Set<String> allowedOrigins = csv(Main.env("ALLOWED_ORIGINS", ""));
+    private final Map<String, long[]> assistantUse = new ConcurrentHashMap<>();   // username -> {count, window start}
+
+    private static Set<String> csv(String s) {
+        Set<String> out = new HashSet<>();
+        for (String p : s.split(",")) if (!p.isBlank()) out.add(p.trim().toLowerCase());
+        return out;
+    }
+
     public Api(Database db, Path webRoot) {
         this.db = db;
-        this.auth = new Auth(db);
+        this.auth = new Auth(db, secure, "true".equalsIgnoreCase(Main.env("TRUST_PROXY", "false")));
         this.assistant = new Assistant(db);
         this.webRoot = webRoot;
     }
@@ -93,6 +104,8 @@ public final class Api implements HttpHandler {
     @Override
     public void handle(HttpExchange ex) throws IOException {
         try {
+            securityHeaders(ex);
+            guardRequest(ex);
             String path = ex.getRequestURI().getPath();
             if (path.startsWith("/api/pdf/")) {
                 pdf(ex, path.substring(9));
@@ -103,17 +116,69 @@ public final class Api implements HttpHandler {
             }
         } catch (HttpError e) {
             json(ex, e.status, "{\"error\":" + quote(e.getMessage()) + "}");
+        } catch (IllegalArgumentException e) {
+            System.err.println("bad request: " + e);
+            json(ex, 400, "{\"error\":\"Invalid request\"}");
         } catch (SQLException e) {
             String state = e.getSQLState() == null ? "" : e.getSQLState();
             boolean userError = state.startsWith("23") || state.startsWith("22") || state.equals("P0001");
-            String msg = state.equals("23503") && e.getMessage().contains("update or delete")
-                    ? "Cannot delete: this record is used by other records" : cleanMessage(e);
-            json(ex, userError ? 400 : 500, "{\"error\":" + quote(msg) + "}");
+            if (!userError) System.err.println("database error: " + e.getMessage());
+            json(ex, userError ? 400 : 500, "{\"error\":" + quote(userError ? friendly(state, e) : "Server error. Please try again.") + "}");
         } catch (Exception e) {
             e.printStackTrace();
             json(ex, 500, "{\"error\":\"Internal server error\"}");
         } finally {
             ex.close();
+        }
+    }
+
+    // ------------------------------------------------------------------ browser safety
+
+    /** Headers that stop other sites framing the app, guessing content types or injecting scripts. */
+    private void securityHeaders(HttpExchange ex) {
+        var h = ex.getResponseHeaders();
+        h.set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+                + "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+        h.set("X-Content-Type-Options", "nosniff");
+        h.set("X-Frame-Options", "DENY");
+        h.set("Referrer-Policy", "no-referrer");
+        h.set("Permissions-Policy", "microphone=(self), camera=(), geolocation=(), payment=()");
+        h.set("Cross-Origin-Opener-Policy", "same-origin");
+        h.set("Cross-Origin-Resource-Policy", "same-origin");
+        if (secure) h.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    }
+
+    /** Rejects unexpected Host headers and cross-site state-changing requests (on top of the SameSite=Strict cookie). */
+    private void guardRequest(HttpExchange ex) throws HttpError {
+        String host = ex.getRequestHeaders().getFirst("Host");
+        if (host == null || host.length() > 255) throw new HttpError(400, "Bad request");
+        if (!allowedHosts.isEmpty() && !allowedHosts.contains(host.toLowerCase())) throw new HttpError(421, "Unknown host");
+        String m = ex.getRequestMethod();
+        if (m.equals("GET") || m.equals("HEAD")) return;
+        String origin = ex.getRequestHeaders().getFirst("Origin");
+        if (origin != null) {
+            String authority;
+            try { authority = java.net.URI.create(origin).getAuthority(); } catch (IllegalArgumentException e) { authority = null; }
+            boolean ok = authority != null && (authority.equalsIgnoreCase(host) || allowedOrigins.contains(origin.toLowerCase()));
+            if (!ok) throw new HttpError(403, "Cross-site request blocked");
+        }
+        String site = ex.getRequestHeaders().getFirst("Sec-Fetch-Site");
+        if (site != null && !site.equals("same-origin") && !site.equals("none")
+                && !(origin != null && allowedOrigins.contains(origin.toLowerCase()))) {
+            throw new HttpError(403, "Cross-site request blocked");
+        }
+    }
+
+    /** Database errors in plain words, without table or constraint names. Messages written for users (P0001) pass through. */
+    private static String friendly(String state, SQLException e) {
+        switch (state) {
+            case "P0001": return cleanMessage(e);
+            case "23505": return "That already exists (a value must be unique)";
+            case "23503": return e.getMessage() != null && e.getMessage().contains("update or delete")
+                    ? "Cannot delete: this record is used by other records" : "A linked record does not exist";
+            case "23502": return "A required value is missing";
+            case "23514": return "A value is outside the allowed range";
+            default: return "That value is not valid";
         }
     }
 
@@ -126,9 +191,8 @@ public final class Api implements HttpHandler {
 
         Auth.User user = auth.require(ex);          // everything below needs a signed-in user
         if (rest.equals("me") && method.equals("GET")) return me(user);
-        if (rest.equals("password") && method.equals("POST")) {
-            return db.scalar("SELECT fn_change_password(?, ?::jsonb)::text", user.username(), requireBody(ex));
-        }
+        if (rest.equals("password") && method.equals("POST")) return auth.changePassword(ex, user, requireBody(ex));
+        if (user.mustChange()) throw new HttpError(403, "Please change your password first");
         String result = route(ex, rest, user);
         if (!method.equals("GET")) audit(user, method, rest);
         return result;
@@ -143,7 +207,7 @@ public final class Api implements HttpHandler {
         List<String> rpc = RPC.stream().filter(f -> Permissions.canRpc(u.role(), f)).sorted().toList();
         return base.substring(0, base.length() - 1) + ",\"can_read\":" + array(read) + ",\"can_write\":" + array(write)
                 + ",\"can_rpc\":" + array(rpc) + ",\"can_dashboard\":" + Permissions.canDashboard(u.role())
-                + ",\"openjarvis\":" + assistant.openJarvisConfigured() + "}";
+                + ",\"must_change\":" + u.mustChange() + ",\"openjarvis\":" + assistant.openJarvisConfigured() + "}";
     }
 
     private static String array(List<String> items) {
@@ -163,12 +227,20 @@ public final class Api implements HttpHandler {
         }
     }
 
+    /** 30 questions a minute per user keeps a script from hammering the database or the OpenJarvis server. */
+    private void limitAssistant(String username) throws HttpError {
+        long now = System.currentTimeMillis();
+        long[] w = assistantUse.compute(username, (k, old) -> old == null || now - old[1] > 60_000 ? new long[] {1, now} : new long[] {old[0] + 1, old[1]});
+        if (w[0] > 30) throw new HttpError(429, "Too many questions. Please wait a minute.");
+    }
+
     // ------------------------------------------------------------------ PDF documents
 
     /** GET /api/pdf/{invoice|quotation|qc|payslip}/{id}: whoever may read the record may print it. */
     private void pdf(HttpExchange ex, String rest) throws Exception {
         if (!ex.getRequestMethod().equals("GET")) throw new HttpError(405, "Method not allowed");
         Auth.User user = auth.require(ex);
+        if (user.mustChange()) throw new HttpError(403, "Please change your password first");
         String[] seg = rest.split("/");
         if (seg.length != 2) throw new HttpError(404, "Not found");
         String[][] kinds = {{"invoice", "invoice", "fn_doc_invoice"}, {"quotation", "quotation", "fn_doc_quotation"},
@@ -199,6 +271,7 @@ public final class Api implements HttpHandler {
             return db.scalar("SELECT fn_dashboard()::text");
         }
         if (seg.length == 1 && seg[0].equals("assistant") && method.equals("POST")) {
+            limitAssistant(user.username());
             Object text = Json.obj(Json.parse(requireBody(ex))).get("text");
             return assistant.answer(user, text == null ? "" : text.toString());
         }
@@ -206,7 +279,12 @@ public final class Api implements HttpHandler {
             if (!RPC.contains(seg[1])) throw new HttpError(404, "Unknown action");
             if (!Permissions.canRpc(user.role(), seg[1])) throw new HttpError(403, "Your role is not allowed to do this");
             String body = readBody(ex);
-            return db.scalar("SELECT " + seg[1] + "(?::jsonb)::text", body.isBlank() ? "{}" : body);
+            String out = db.scalar("SELECT " + seg[1] + "(?::jsonb)::text", body.isBlank() ? "{}" : body);
+            if (seg[1].equals("fn_set_password")) {   // a reset signs that user out everywhere
+                String who = db.scalar("SELECT username FROM app_user WHERE id = ?::int", Json.str(Json.obj(Json.parse(body)).get("id")));
+                if (who != null) auth.revokeUser(who, null);
+            }
+            return out;
         }
         if (seg.length == 0 || seg.length > 2) throw new HttpError(404, "Not found");
 
@@ -347,7 +425,9 @@ public final class Api implements HttpHandler {
             return;
         }
         Path file = webRoot.resolve("." + (path.equals("/") ? "/index.html" : path)).normalize();
-        if (!file.startsWith(webRoot) || !Files.isRegularFile(file)) {
+        boolean hidden = false;
+        for (Path part : webRoot.relativize(file)) if (part.toString().startsWith(".")) hidden = true;
+        if (hidden || !file.startsWith(webRoot) || !Files.isRegularFile(file)) {
             ex.sendResponseHeaders(404, -1);
             return;
         }

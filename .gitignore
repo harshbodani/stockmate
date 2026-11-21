@@ -2,3 +2,13 @@ backend/target/
 *.class
 .idea/
 .vscode/
+
+# secrets and local settings
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.jks
+*.log
+node_modules/

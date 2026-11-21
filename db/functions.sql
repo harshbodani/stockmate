@@ -572,7 +572,19 @@ FROM payslip s WHERE s.id = p_id;
 $$;
 
 -- ---------- Users & login ----------
--- {username, password} -> {username, full_name, role}
+-- Password rules: 10+ characters, a letter and a digit, not the username, not an obvious password.
+CREATE OR REPLACE FUNCTION fn_check_password(pw text, uname text) RETURNS void LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+  IF length(COALESCE(pw, '')) < 10 THEN RAISE EXCEPTION 'Password must be at least 10 characters'; END IF;
+  IF length(pw) > 200 THEN RAISE EXCEPTION 'Password is too long'; END IF;
+  IF pw !~ '[A-Za-z]' OR pw !~ '[0-9]' THEN RAISE EXCEPTION 'Password must contain at least one letter and one digit'; END IF;
+  IF uname IS NOT NULL AND position(lower(uname) in lower(pw)) > 0 THEN RAISE EXCEPTION 'Password must not contain the username'; END IF;
+  IF lower(pw) ~ '(password|qwerty|123456|admin123|stockmate|filtsap|letmein|welcome)' THEN
+    RAISE EXCEPTION 'That password is too easy to guess. Choose something less predictable';
+  END IF;
+END $$;
+
+-- {username, password} -> {username, full_name, role, must_change}
 CREATE OR REPLACE FUNCTION fn_login(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE u app_user%ROWTYPE;
 BEGIN
@@ -584,33 +596,34 @@ BEGIN
   IF u.password_hash <> crypt(COALESCE(p->>'password', ''), u.password_hash) THEN
     RAISE EXCEPTION 'Wrong username or password';
   END IF;
-  RETURN jsonb_build_object('username', u.username, 'full_name', u.full_name, 'role', u.role);
+  RETURN jsonb_build_object('username', u.username, 'full_name', u.full_name, 'role', u.role, 'must_change', u.must_change);
 END $$;
 
--- {username, full_name, role, password}
+-- {username, full_name, role, password}: the new user must choose their own password at first sign-in
 CREATE OR REPLACE FUNCTION fn_create_user(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
-DECLARE pw text := COALESCE(p->>'password', ''); uid int;
+DECLARE pw text := COALESCE(p->>'password', ''); uid int; un text := lower(trim(COALESCE(p->>'username', '')));
 BEGIN
-  IF length(pw) < 8 THEN RAISE EXCEPTION 'Password must be at least 8 characters'; END IF;
+  IF un !~ '^[a-z0-9._-]{3,40}$' THEN RAISE EXCEPTION 'Username must be 3-40 characters: lower-case letters, digits, dot, dash or underscore'; END IF;
+  PERFORM fn_check_password(pw, un);
   IF p->>'role' IS NULL OR p->>'role' NOT IN ('admin','sales','store','accounts','hr','cashier','viewer') THEN
     RAISE EXCEPTION 'Unknown role';
   END IF;
-  IF length(trim(COALESCE(p->>'username', ''))) < 3 THEN RAISE EXCEPTION 'Username must be at least 3 letters'; END IF;
-  INSERT INTO app_user (username, full_name, role, password_hash)
-  VALUES (lower(trim(p->>'username')), p->>'full_name', p->>'role', crypt(pw, gen_salt('bf', 10)))
+  INSERT INTO app_user (username, full_name, role, password_hash, must_change)
+  VALUES (un, left(p->>'full_name', 100), p->>'role', crypt(pw, gen_salt('bf', 10)), true)
   RETURNING id INTO uid;
   RETURN jsonb_build_object('id', uid);
 EXCEPTION WHEN unique_violation THEN
   RAISE EXCEPTION 'That username is already taken';
 END $$;
 
--- admin resets someone's password: {id, password}
+-- admin resets someone's password: {id, password}; they must replace it at next sign-in
 CREATE OR REPLACE FUNCTION fn_set_password(p jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
-DECLARE pw text := COALESCE(p->>'password', '');
+DECLARE pw text := COALESCE(p->>'password', ''); un text;
 BEGIN
-  IF length(pw) < 8 THEN RAISE EXCEPTION 'Password must be at least 8 characters'; END IF;
-  UPDATE app_user SET password_hash = crypt(pw, gen_salt('bf', 10)) WHERE id = (p->>'id')::int;
-  IF NOT FOUND THEN RAISE EXCEPTION 'User not found'; END IF;
+  SELECT username INTO un FROM app_user WHERE id = (p->>'id')::int;
+  IF un IS NULL THEN RAISE EXCEPTION 'User not found'; END IF;
+  PERFORM fn_check_password(pw, un);
+  UPDATE app_user SET password_hash = crypt(pw, gen_salt('bf', 10)), must_change = true WHERE username = un;
   RETURN jsonb_build_object('ok', true);
 END $$;
 
@@ -622,8 +635,9 @@ BEGIN
   IF NOT FOUND OR u.password_hash <> crypt(COALESCE(p->>'old_password', ''), u.password_hash) THEN
     RAISE EXCEPTION 'Current password is wrong';
   END IF;
-  IF length(pw) < 8 THEN RAISE EXCEPTION 'New password must be at least 8 characters'; END IF;
-  UPDATE app_user SET password_hash = crypt(pw, gen_salt('bf', 10)) WHERE id = u.id;
+  IF pw = COALESCE(p->>'old_password', '') THEN RAISE EXCEPTION 'Choose a password different from the current one'; END IF;
+  PERFORM fn_check_password(pw, uname);
+  UPDATE app_user SET password_hash = crypt(pw, gen_salt('bf', 10)), must_change = false WHERE id = u.id;
   RETURN jsonb_build_object('ok', true);
 END $$;
 
@@ -710,6 +724,48 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS qc_lot_match ON qc_inspection;
 CREATE TRIGGER qc_lot_match BEFORE INSERT OR UPDATE ON qc_inspection FOR EACH ROW EXECUTE FUNCTION trg_qc_lot_match();
+
+-- Document headers can only be edited (or deleted) while still in their first state; after that only the action functions change them.
+-- args: editable status, then the columns the action functions are allowed to change.
+CREATE OR REPLACE FUNCTION trg_header_lock() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE editable text := TG_ARGV[0]; excl text[] := TG_ARGV[2:]; o jsonb; n jsonb;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.status <> editable THEN
+      RAISE EXCEPTION 'This % is "%" and can no longer be deleted', replace(TG_TABLE_NAME, '_', ' '), OLD.status;
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF OLD.status <> editable THEN
+    o := to_jsonb(OLD) - excl; n := to_jsonb(NEW) - excl;
+    IF o <> n THEN
+      RAISE EXCEPTION 'This % is "%" and can no longer be edited', replace(TG_TABLE_NAME, '_', ' '), OLD.status;
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS so_header_lock ON sales_order;
+CREATE TRIGGER so_header_lock BEFORE UPDATE OR DELETE ON sales_order FOR EACH ROW EXECUTE FUNCTION trg_header_lock('draft', 'x', 'status');
+DROP TRIGGER IF EXISTS po_header_lock ON purchase_order;
+CREATE TRIGGER po_header_lock BEFORE UPDATE OR DELETE ON purchase_order FOR EACH ROW EXECUTE FUNCTION trg_header_lock('draft', 'x', 'status');
+DROP TRIGGER IF EXISTS mo_header_lock ON production_order;
+CREATE TRIGGER mo_header_lock BEFORE UPDATE OR DELETE ON production_order FOR EACH ROW EXECUTE FUNCTION trg_header_lock('planned', 'x', 'status');
+DROP TRIGGER IF EXISTS qt_header_lock ON quotation;
+CREATE TRIGGER qt_header_lock BEFORE UPDATE OR DELETE ON quotation FOR EACH ROW EXECUTE FUNCTION trg_header_lock('draft', 'x', 'status', 'sales_order_id', 'valid_until');
+DROP TRIGGER IF EXISTS qc_header_lock ON qc_inspection;
+CREATE TRIGGER qc_header_lock BEFORE UPDATE OR DELETE ON qc_inspection FOR EACH ROW EXECUTE FUNCTION trg_header_lock('open', 'x', 'status', 'disposition', 'rejection_reason');
+
+-- the company record is needed for every invoice
+CREATE OR REPLACE FUNCTION trg_company_keep() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'Company settings cannot be deleted'; END $$;
+DROP TRIGGER IF EXISTS company_keep ON company;
+CREATE TRIGGER company_keep BEFORE DELETE ON company FOR EACH ROW EXECUTE FUNCTION trg_company_keep();
+
+-- the audit log is append-only
+CREATE OR REPLACE FUNCTION trg_audit_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'The audit log cannot be changed or deleted'; END $$;
+DROP TRIGGER IF EXISTS audit_append_only ON audit_log;
+CREATE TRIGGER audit_append_only BEFORE UPDATE OR DELETE ON audit_log FOR EACH ROW EXECUTE FUNCTION trg_audit_append_only();
 
 -- payments are a ledger: no edits, no deletes
 CREATE OR REPLACE FUNCTION trg_payment_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
